@@ -256,6 +256,7 @@ pub struct IndexStatusOutput {
     pub item_count: usize,
     pub chunk_count: usize,
     pub vector_count: usize,
+    pub items_without_fulltext: usize,
     pub model_name: String,
     pub model_dim: usize,
     pub last_sync: String,
@@ -265,10 +266,11 @@ pub struct IndexStatusOutput {
 impl HumanDisplay for IndexStatusOutput {
     fn human_display(&self) -> String {
         format!(
-            "Index Status\n  Items: {}\n  Chunks: {}\n  Vectors: {}\n  Model: {} (dim {})\n  Last sync: {}\n  Data dir: {}",
+            "Index Status\n  Items: {}\n  Chunks: {}\n  Vectors: {}\n  Items without fulltext: {}\n  Model: {} (dim {})\n  Last sync: {}\n  Data dir: {}",
             self.item_count,
             self.chunk_count,
             self.vector_count,
+            self.items_without_fulltext,
             self.model_name,
             self.model_dim,
             if self.last_sync.is_empty() {

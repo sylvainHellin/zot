@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashMap;
 
 use crate::api::ZoteroClient;
 use crate::index::{
@@ -55,6 +56,9 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
     }
 
     // 4. Fetch and index new/updated items
+    // Track items that were actually indexed with >=1 chunk this run, mapped to
+    // their remote version, so only those get a recorded version in finalize.
+    let mut indexed_versions: HashMap<String, u64> = HashMap::new();
     if !to_add.is_empty() {
         eprintln!("Fetching {} items from Zotero...", to_add.len());
         let items = client.fetch_items(&to_add)?;
@@ -62,6 +66,18 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
         let writer = store.open_writer()?;
         let regular_items: Vec<_> = items.iter().filter(|i| i.is_regular_item()).collect();
         let total = regular_items.len();
+
+        // Invariant: any fetched item we deliberately skip due to type
+        // (attachment/note/annotation) must still be recorded with its remote
+        // version so finalize persists it and it does not perpetually re-queue
+        // in `to_add` on the next incremental run. Regular items that yielded
+        // zero chunks are intentionally NOT recorded here so the next run
+        // retries them; regular-item success/failure is handled below.
+        for item in items.iter().filter(|i| !i.is_regular_item()) {
+            if let Some(version) = remote_versions.get(&item.key) {
+                indexed_versions.insert(item.key.clone(), *version);
+            }
+        }
 
         for (i, item) in regular_items.iter().enumerate() {
             eprint!(
@@ -111,6 +127,15 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
 
             let ft = fulltext.unwrap_or_default();
             store.add_item(&writer, &indexable, &chunks, &embeddings, &ft)?;
+
+            // Only record a version for items that produced >=1 chunk. Items that
+            // yielded zero chunks (or were never returned by the API) are left out
+            // so the next incremental run retries them.
+            if !chunks.is_empty() {
+                if let Some(version) = remote_versions.get(&item.key) {
+                    indexed_versions.insert(item.key.clone(), *version);
+                }
+            }
         }
 
         store.commit_writer(writer)?;
@@ -118,7 +143,7 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
     }
 
     // 5. Finalize
-    store.finalize(remote_versions)?;
+    store.finalize(&remote_versions, indexed_versions)?;
 
     let meta = store.meta();
     eprintln!(
@@ -134,10 +159,13 @@ pub fn run_index_status(json: bool) -> Result<()> {
     let meta = store.meta();
     let data_dir = IndexStore::data_dir()?.display().to_string();
 
+    let items_without_fulltext = store.count_items_without_fulltext()?;
+
     let output = IndexStatusOutput {
         item_count: meta.item_count,
         chunk_count: meta.chunk_count,
         vector_count: store.vector_count(),
+        items_without_fulltext,
         model_name: meta.model_name.clone(),
         model_dim: meta.model_dim,
         last_sync: meta.last_sync.clone(),

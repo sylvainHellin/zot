@@ -134,6 +134,11 @@ impl IndexStore {
     /// Open an existing index or create a new one.
     pub fn open_or_create(model_name: &str, model_dim: usize) -> Result<Self> {
         let base_dir = Self::data_dir()?;
+        Self::open_at(base_dir, model_name, model_dim)
+    }
+
+    /// Open or create an index rooted at a specific base directory.
+    fn open_at(base_dir: PathBuf, model_name: &str, model_dim: usize) -> Result<Self> {
         let tantivy_dir = base_dir.join("tantivy");
         let vectors_path = base_dir.join("vectors.bin");
         let meta_path = base_dir.join("meta.json");
@@ -238,7 +243,7 @@ impl IndexStore {
             // Remove from vectors
             let mut i = 0;
             while i < self.chunk_ids.len() {
-                if self.chunk_ids[i].starts_with(key) {
+                if chunk_belongs_to(&self.chunk_ids[i], key) {
                     self.chunk_ids.remove(i);
                     self.vectors.remove(i);
                 } else {
@@ -267,8 +272,20 @@ impl IndexStore {
         embeddings: &[Vec<f32>],
         fulltext: &str,
     ) -> Result<()> {
-        // Delete old data for this item first
+        // Delete old data for this item first (tantivy docs)
         writer.delete_term(Term::from_field_text(self.fields.item_key, &item.item_key));
+
+        // Purge any existing vectors/chunk_ids for this item so re-ingest is
+        // idempotent (mirror delete_items, which matches chunk_ids by key prefix).
+        let mut i = 0;
+        while i < self.chunk_ids.len() {
+            if chunk_belongs_to(&self.chunk_ids[i], &item.item_key) {
+                self.chunk_ids.remove(i);
+                self.vectors.remove(i);
+            } else {
+                i += 1;
+            }
+        }
 
         for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
             let mut doc = tantivy::TantivyDocument::default();
@@ -318,8 +335,32 @@ impl IndexStore {
     }
 
     /// Finalize after indexing: save vectors, update metadata, reload reader.
-    pub fn finalize(&mut self, item_versions: HashMap<String, u64>) -> Result<()> {
-        self.meta.items = item_versions;
+    ///
+    /// The persisted version map is rebuilt rather than blindly overwritten with
+    /// the full remote map:
+    ///   (a) previously-known versions for items still present remotely that were
+    ///       NOT reprocessed this run are kept, and
+    ///   (b) `indexed_versions` carries the remote version for each item that was
+    ///       successfully indexed with >=1 chunk this run (overlaid on top).
+    /// Items absent from `remote_versions` (deleted) are dropped. Items that were
+    /// queued for indexing but yielded zero chunks (or were never returned by the
+    /// API) are intentionally not recorded, so the next incremental run retries them.
+    pub fn finalize(
+        &mut self,
+        remote_versions: &HashMap<String, u64>,
+        indexed_versions: HashMap<String, u64>,
+    ) -> Result<()> {
+        let mut persisted: HashMap<String, u64> = self
+            .meta
+            .items
+            .iter()
+            .filter(|(k, _)| remote_versions.contains_key(*k))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        for (key, version) in indexed_versions {
+            persisted.insert(key, version);
+        }
+        self.meta.items = persisted;
         self.meta.item_count = self.meta.items.len();
         self.meta.chunk_count = self.chunk_ids.len();
         self.meta.last_sync = chrono_now();
@@ -601,6 +642,36 @@ impl IndexStore {
     pub fn vector_count(&self) -> usize {
         self.vectors.len()
     }
+
+    /// Count indexed items that have no stored fulltext.
+    ///
+    /// Fulltext is stored on each item's metadata chunk. An item whose metadata
+    /// chunk has an empty (or missing) fulltext value counts as "no fulltext";
+    /// this covers items that only produced a metadata chunk (e.g. PDF extraction
+    /// failed or no PDF was attached). Scans the local index only.
+    pub fn count_items_without_fulltext(&self) -> Result<usize> {
+        let searcher = self.reader.searcher();
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.chunk_type, "metadata"),
+            IndexRecordOption::Basic,
+        );
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(self.chunk_ids.len().max(1)))?;
+
+        let mut count = 0;
+        for (_, doc_address) in top_docs {
+            let doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
+            let has_fulltext = doc
+                .get_first(self.fields.fulltext)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if !has_fulltext {
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
 }
 
 /// Filters applicable to both BM25 and vector search.
@@ -688,6 +759,17 @@ fn chrono_now() -> String {
     format!("{now}")
 }
 
+/// Returns true if `chunk_id` was emitted for `key` exactly.
+///
+/// Chunks use the `"{key}_meta"` and `"{key}_{i}"` formats (see
+/// `chunker::chunk_item`), so any chunk whose id is exactly `key` or starts
+/// with `"{key}_"` belongs to `key`. A bare `starts_with(key)` would falsely
+/// match items whose keys share `key` as a strict prefix (e.g. key="ABC"
+/// matching chunk_id="ABCD_meta").
+fn chunk_belongs_to(chunk_id: &str, key: &str) -> bool {
+    chunk_id == key || chunk_id.starts_with(&format!("{}_", key))
+}
+
 /// Save vectors and chunk IDs to a binary file.
 fn save_vectors(
     path: &Path,
@@ -718,6 +800,243 @@ fn save_vectors(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::chunker::{Chunk, ChunkType};
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("zot_test_{tag}_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn indexable(key: &str) -> IndexableItem {
+        IndexableItem {
+            item_key: key.to_string(),
+            title: "Test".to_string(),
+            creators: String::new(),
+            abstract_note: String::new(),
+            tags: String::new(),
+            item_type: "journalArticle".to_string(),
+            collections: Vec::new(),
+            date: String::new(),
+            doi: String::new(),
+            publication_title: String::new(),
+            fulltext: None,
+        }
+    }
+
+    fn make_chunks(key: &str, n: usize) -> Vec<Chunk> {
+        let mut chunks = vec![Chunk {
+            chunk_id: format!("{key}_meta"),
+            item_key: key.to_string(),
+            chunk_type: ChunkType::Metadata,
+            text: "meta".to_string(),
+            char_start: 0,
+            char_end: 0,
+        }];
+        for i in 0..n {
+            chunks.push(Chunk {
+                chunk_id: format!("{key}_{i}"),
+                item_key: key.to_string(),
+                chunk_type: ChunkType::Fulltext,
+                text: format!("chunk {i}"),
+                char_start: 0,
+                char_end: 0,
+            });
+        }
+        chunks
+    }
+
+    // Regression test for vector-store duplication on re-ingest (issue #1, bug 2).
+    // Re-adding the same item_key must purge its stale vectors, so vector_count
+    // equals the chunk count of the latest add, not the sum of both adds.
+    #[test]
+    fn add_item_dedups_vectors_on_reingest() {
+        let dim = 3;
+        let dir = unique_temp_dir("dedup");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        let key = "ITEMKEY1";
+
+        // First add: metadata + 2 fulltext chunks = 3 vectors.
+        let chunks1 = make_chunks(key, 2);
+        let emb1: Vec<Vec<f32>> = (0..chunks1.len()).map(|_| vec![0.1, 0.2, 0.3]).collect();
+        let writer = store.open_writer().unwrap();
+        store
+            .add_item(&writer, &indexable(key), &chunks1, &emb1, "")
+            .unwrap();
+        store.commit_writer(writer).unwrap();
+        assert_eq!(store.vector_count(), 3);
+
+        // Second add (re-ingest with changed/fewer chunks): metadata + 1 fulltext = 2.
+        let chunks2 = make_chunks(key, 1);
+        let emb2: Vec<Vec<f32>> = (0..chunks2.len()).map(|_| vec![0.4, 0.5, 0.6]).collect();
+        let writer = store.open_writer().unwrap();
+        store
+            .add_item(&writer, &indexable(key), &chunks2, &emb2, "")
+            .unwrap();
+        store.commit_writer(writer).unwrap();
+
+        // Must equal the second add's chunk count (2), not the sum (5).
+        assert_eq!(store.vector_count(), 2);
+        assert!(store.chunk_ids.iter().all(|c| c.starts_with(key)));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // finalize must not blindly record the full remote map: only items that were
+    // indexed this run (passed in indexed_versions) plus previously-known items
+    // still present remotely get a recorded version. Zero-chunk/never-fetched
+    // items are left out for retry; deleted items are dropped.
+    #[test]
+    fn finalize_only_records_indexed_and_known_present() {
+        let dim = 3;
+        let dir = unique_temp_dir("finalize");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        // Seed a previously-known item.
+        store.meta.items.insert("OLD_PRESENT".to_string(), 5);
+        store.meta.items.insert("OLD_DELETED".to_string(), 7);
+
+        let mut remote = HashMap::new();
+        remote.insert("OLD_PRESENT".to_string(), 5); // unchanged, still remote
+        remote.insert("NEW_OK".to_string(), 10); // indexed this run
+        remote.insert("NEW_FAILED".to_string(), 11); // queued but zero chunks, must retry
+        // OLD_DELETED absent from remote -> dropped.
+
+        let mut indexed = HashMap::new();
+        indexed.insert("NEW_OK".to_string(), 10);
+
+        store.finalize(&remote, indexed).unwrap();
+
+        let items = &store.meta.items;
+        assert_eq!(items.get("OLD_PRESENT"), Some(&5));
+        assert_eq!(items.get("NEW_OK"), Some(&10));
+        assert!(!items.contains_key("NEW_FAILED"), "failed item must be retried");
+        assert!(!items.contains_key("OLD_DELETED"), "deleted item must be dropped");
+        assert_eq!(items.len(), 2);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Direct checks for the chunk_belongs_to predicate. Keys that share a
+    // strict prefix (e.g. "ABC" and "ABCD") must NOT be cross-matched: a chunk
+    // emitted for "ABCD" starts with "ABCD_" but not with "ABC_".
+    #[test]
+    fn chunk_belongs_to_handles_prefix_keys() {
+        // Owns: exact id or "{key}_...".
+        assert!(chunk_belongs_to("ABC", "ABC"));
+        assert!(chunk_belongs_to("ABC_meta", "ABC"));
+        assert!(chunk_belongs_to("ABC_0", "ABC"));
+        assert!(chunk_belongs_to("ABC_42", "ABC"));
+
+        // Foreign: id starts with the candidate key but the next char is not '_'.
+        assert!(!chunk_belongs_to("ABCD_meta", "ABC"));
+        assert!(!chunk_belongs_to("ABCD_0", "ABC"));
+        assert!(!chunk_belongs_to("ABCMeta", "ABC"));
+        assert!(!chunk_belongs_to("ABCMeta_0", "ABC"));
+
+        // Reverse direction: shorter key is a prefix of a longer candidate.
+        assert!(!chunk_belongs_to("ABC", "AB"));
+        assert!(!chunk_belongs_to("ABC_meta", "AB"));
+
+        // Empty key and unrelated ids.
+        assert!(!chunk_belongs_to("", "ABC"));
+        assert!(!chunk_belongs_to("XYZ_meta", "ABC"));
+    }
+
+    // Regression: add_item must not purge vectors belonging to another item
+    // whose key has this item's key as a strict prefix. Bug would have wiped
+    // ABCD's vectors when adding ABC, leaving ABCD unsearchable until a force
+    // rebuild.
+    #[test]
+    fn add_item_does_not_purge_prefixed_other_item_vectors() {
+        let dim = 3;
+        let dir = unique_temp_dir("add_prefix");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        let key_long = "ABCD";
+        let key_short = "ABC"; // strict prefix of key_long
+
+        // Add the longer (ABCD) item first: meta + 2 fulltext = 3 vectors.
+        let chunks_long = make_chunks(key_long, 2);
+        let emb_long: Vec<Vec<f32>> = (0..chunks_long.len())
+            .map(|_| vec![0.1, 0.2, 0.3])
+            .collect();
+        let writer = store.open_writer().unwrap();
+        store
+            .add_item(&writer, &indexable(key_long), &chunks_long, &emb_long, "")
+            .unwrap();
+        store.commit_writer(writer).unwrap();
+        assert_eq!(store.vector_count(), 3);
+
+        // Now add the shorter (ABC) item: meta + 1 fulltext = 2 vectors. The
+        // old `starts_with(key)` predicate would have purged all of ABCD's
+        // vectors here (they all start with "ABC"). The fix leaves them alone.
+        let chunks_short = make_chunks(key_short, 1);
+        let emb_short: Vec<Vec<f32>> = (0..chunks_short.len())
+            .map(|_| vec![0.4, 0.5, 0.6])
+            .collect();
+        let writer = store.open_writer().unwrap();
+        store
+            .add_item(&writer, &indexable(key_short), &chunks_short, &emb_short, "")
+            .unwrap();
+        store.commit_writer(writer).unwrap();
+
+        // ABCD's 3 vectors survive + ABC's 2 vectors are added = 5 total.
+        // Pre-fix this would have been 2 (only ABC's after the bad purge).
+        assert_eq!(store.vector_count(), 5);
+        let abcd_count = store.chunk_ids.iter().filter(|c| c.starts_with("ABCD")).count();
+        let abc_count = store.chunk_ids.iter().filter(|c| c.starts_with("ABC")).count();
+        assert_eq!(abcd_count, 3, "ABCD's vectors must not be purged by ABC");
+        assert_eq!(abc_count, 5, "ABC's chunks (3 ABCD + 2 ABC) all start with ABC");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Regression: delete_items must not purge vectors belonging to another item
+    // whose key has this item's key as a strict prefix.
+    #[test]
+    fn delete_items_does_not_purge_prefixed_other_item_vectors() {
+        let dim = 3;
+        let dir = unique_temp_dir("del_prefix");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        // Add two items with prefix-sharing keys (meta + 1 fulltext = 2 each).
+        for key in ["ABCD", "ABC"] {
+            let chunks = make_chunks(key, 1);
+            let emb: Vec<Vec<f32>> = (0..chunks.len())
+                .map(|_| vec![0.1, 0.2, 0.3])
+                .collect();
+            let writer = store.open_writer().unwrap();
+            store
+                .add_item(&writer, &indexable(key), &chunks, &emb, "")
+                .unwrap();
+            store.commit_writer(writer).unwrap();
+        }
+        assert_eq!(store.vector_count(), 4);
+
+        // Delete only the shorter (prefix) key.
+        store.delete_items(&["ABC".to_string()]).unwrap();
+
+        // ABC's 2 vectors gone, ABCD's 2 vectors remain.
+        assert_eq!(store.vector_count(), 2);
+        assert!(
+            store.chunk_ids.iter().all(|c| c.starts_with("ABCD")),
+            "ABCD's vectors must not be purged when deleting ABC",
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Load vectors and chunk IDs from a binary file.
