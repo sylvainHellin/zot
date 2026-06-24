@@ -33,11 +33,29 @@ impl ZoteroClient {
     fn health_check(&self) -> Result<()> {
         // The root path returns 404 ("No endpoint found") which is fine -- it means Zotero is running.
         // A connection error means Zotero is not running.
-        let url = self.base_url.replace("/api/users/0", "/");
-        match self.client.get(&url).send() {
-            Ok(_) => Ok(()), // Any response means Zotero is reachable
-            Err(_) => bail!("Could not reach Zotero. Is it running?\n  (expected at {url})"),
+        let root_url = self.base_url.replace("/api/users/0", "/");
+        if self.client.get(&root_url).send().is_err() {
+            bail!("Could not reach Zotero. Is it running?\n  (expected at {root_url})");
         }
+
+        // Zotero is reachable, but the local API (the `/api/...` endpoints we rely on) is
+        // disabled by default. Probe it now so every command fails early with a clear,
+        // actionable message instead of a cryptic JSON parse error later.
+        let probe_url = format!("{}/items?format=versions&limit=1", self.base_url);
+        if let Ok(resp) = self.client.get(&probe_url).send() {
+            if resp.status() == reqwest::StatusCode::FORBIDDEN {
+                let body = resp.text().unwrap_or_default();
+                if body.contains("Local API is not enabled") {
+                    bail!(
+                        "Zotero is running, but its local API is disabled.\n  \
+                         Enable it in Zotero: Settings -> Advanced -> Config Editor,\n  \
+                         set `httpServer.localAPI.enabled` to true (then restart Zotero)."
+                    );
+                }
+                bail!("Zotero local API returned 403 Forbidden: {}", body.trim());
+            }
+        }
+        Ok(())
     }
 
     /// Fetch {key: version} map for all non-attachment/note/annotation items.
@@ -51,7 +69,13 @@ impl ZoteroClient {
             .get(&url)
             .send()
             .context("Failed to fetch item versions")?;
-        let versions: HashMap<String, u64> = resp.json().context("Failed to parse versions")?;
+        let status = resp.status();
+        let body = resp.text().context("Failed to read versions response")?;
+        if !status.is_success() {
+            bail!("Zotero returned {status} fetching item versions: {}", body.trim());
+        }
+        let versions: HashMap<String, u64> =
+            serde_json::from_str(&body).context("Failed to parse versions")?;
         Ok(versions)
     }
 
