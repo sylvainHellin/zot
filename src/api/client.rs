@@ -234,6 +234,10 @@ impl ZoteroClient {
 #[derive(Debug, Clone, Default)]
 pub struct SearchParams {
     pub tag: Option<String>,
+    // Populated from the `--creator` flag. The Zotero `titleCreatorYear`/`everything`
+    // qmode already matches on creator via the free-text query, so this is not sent
+    // as a separate filter param yet -- kept for an explicit creator filter later.
+    #[allow(dead_code)]
     pub creator: Option<String>,
     pub item_type: Option<String>,
     pub collection: Option<String>,

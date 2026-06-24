@@ -11,6 +11,8 @@ pub struct RerankResult {
 /// Trait for reranking models -- allows future model swaps.
 pub trait Reranker: Send + Sync {
     fn rerank(&mut self, query: &str, documents: &[&str], top_n: usize) -> Result<Vec<RerankResult>>;
+    /// Human-readable model name. Used for diagnostics / future model selection.
+    #[allow(dead_code)]
     fn name(&self) -> &str;
 }
 

@@ -128,7 +128,9 @@ impl ZoteroItem {
     }
 }
 
-/// Collection info from the Zotero API
+/// Collection info from the Zotero API.
+/// Reserved for a future `collections` listing command; not constructed yet.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoteroCollection {
     pub key: String,
@@ -136,6 +138,7 @@ pub struct ZoteroCollection {
     pub data: ZoteroCollectionData,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoteroCollectionData {
     pub key: String,

@@ -67,6 +67,9 @@ pub struct IndexableItem {
     pub date: String,
     pub doi: String,
     pub publication_title: String,
+    // Carried alongside the item for indexing; chunk text is stored per-chunk,
+    // so the whole-item copy is not read back directly.
+    #[allow(dead_code)]
     pub fulltext: Option<String>,
 }
 
@@ -678,7 +681,10 @@ impl IndexStore {
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilters {
     pub tag: Option<String>,
-    pub creator: Option<String>, // used for BM25 text matching, not exact filter
+    // Populated from `--creator`; creator matching happens through the BM25 query
+    // text rather than an exact filter, so this field is not read here directly.
+    #[allow(dead_code)]
+    pub creator: Option<String>,
     pub item_type: Option<String>,
     pub collection: Option<String>,
 }
