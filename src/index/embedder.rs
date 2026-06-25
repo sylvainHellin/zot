@@ -8,6 +8,13 @@ pub trait Embedder: Send + Sync {
     fn name(&self) -> &str;
 }
 
+/// Cap the embedding batch size. fastembed defaults to 256, which with BGE's
+/// 512-token sequence length makes a single attention tensor ~3 GB
+/// (256*12*512*512*4 bytes); ONNX Runtime's arena then grows to 5-8 GB and
+/// never shrinks. A batch of 32 keeps that tensor near ~400 MB and the whole
+/// embedder footprint to a few hundred MB.
+const EMBED_BATCH_SIZE: usize = 32;
+
 /// BGE-small-en-v1.5 embedder via fastembed ONNX.
 pub struct BgeSmallEmbedder {
     model: TextEmbedding,
@@ -29,7 +36,7 @@ impl Embedder for BgeSmallEmbedder {
         let texts_owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
         let embeddings = self
             .model
-            .embed(texts_owned, None)
+            .embed(texts_owned, Some(EMBED_BATCH_SIZE))
             .context("Embedding failed")?;
         Ok(embeddings)
     }

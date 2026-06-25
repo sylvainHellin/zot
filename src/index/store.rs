@@ -211,6 +211,20 @@ impl IndexStore {
             (Vec::new(), Vec::new())
         };
 
+        // Integrity check: tantivy should hold exactly one document per vector
+        // (one per chunk). A mismatch means a previous run was interrupted
+        // mid-write (e.g. OOM during `--force`), leaving meta.json/vectors.bin
+        // out of sync with the tantivy segments. Warn so the user can rebuild.
+        let num_docs = reader.searcher().num_docs() as usize;
+        if num_docs != vectors.len() {
+            eprintln!(
+                "Warning: index looks inconsistent ({} search docs vs {} vectors). \
+                 Run `zot index --force` to rebuild.",
+                num_docs,
+                vectors.len(),
+            );
+        }
+
         Ok(Self {
             base_dir,
             index,
@@ -353,6 +367,33 @@ impl IndexStore {
         remote_versions: &HashMap<String, u64>,
         indexed_versions: HashMap<String, u64>,
     ) -> Result<()> {
+        self.rebuild_items_map(remote_versions, &indexed_versions);
+        self.write_to_disk()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Persist progress mid-run (after committing the tantivy writer) without
+    /// reloading the reader. Leaves a consistent on-disk index so an interrupted
+    /// run resumes the remaining items instead of trusting a stale meta.json.
+    pub fn checkpoint(
+        &mut self,
+        remote_versions: &HashMap<String, u64>,
+        indexed_versions: &HashMap<String, u64>,
+    ) -> Result<()> {
+        self.rebuild_items_map(remote_versions, indexed_versions);
+        self.write_to_disk()
+    }
+
+    /// Recompute the persisted version map: keep previously-known items still
+    /// present remotely, then overlay items indexed this run. Items absent from
+    /// `remote_versions` (deleted) are dropped; items not in either map (queued
+    /// but zero-chunk / never fetched) are left out so the next run retries them.
+    fn rebuild_items_map(
+        &mut self,
+        remote_versions: &HashMap<String, u64>,
+        indexed_versions: &HashMap<String, u64>,
+    ) {
         let mut persisted: HashMap<String, u64> = self
             .meta
             .items
@@ -361,15 +402,18 @@ impl IndexStore {
             .map(|(k, v)| (k.clone(), *v))
             .collect();
         for (key, version) in indexed_versions {
-            persisted.insert(key, version);
+            persisted.insert(key.clone(), *version);
         }
         self.meta.items = persisted;
+    }
+
+    /// Write the current in-memory state (vectors + meta) to disk atomically
+    /// enough that meta.json never claims more than the vectors/tantivy hold.
+    fn write_to_disk(&mut self) -> Result<()> {
         self.meta.item_count = self.meta.items.len();
         self.meta.chunk_count = self.chunk_ids.len();
         self.meta.last_sync = chrono_now();
-        self.meta.model_name = self.meta.model_name.clone();
 
-        // Save vectors
         save_vectors(
             &self.base_dir.join("vectors.bin"),
             &self.vectors,
@@ -377,12 +421,8 @@ impl IndexStore {
             self.meta.model_dim,
         )?;
 
-        // Save metadata
         let meta_str = serde_json::to_string_pretty(&self.meta)?;
         fs::write(self.base_dir.join("meta.json"), meta_str)?;
-
-        // Reload reader
-        self.reader.reload()?;
 
         Ok(())
     }
@@ -401,6 +441,13 @@ impl IndexStore {
         self.meta.items.clear();
         self.meta.item_count = 0;
         self.meta.chunk_count = 0;
+
+        // Persist the emptied state immediately. The tantivy deletion above is
+        // already committed to disk; if we crash before finalize without doing
+        // this, the stale meta.json/vectors.bin would make the next run believe
+        // the (now-empty) index is full and skip everything.
+        self.reader.reload()?;
+        self.write_to_disk()?;
 
         Ok(())
     }

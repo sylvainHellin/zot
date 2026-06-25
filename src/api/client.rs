@@ -58,12 +58,17 @@ impl ZoteroClient {
         Ok(())
     }
 
-    /// Fetch {key: version} map for all non-attachment/note/annotation items.
+    /// Fetch {key: version} map for candidate items to index.
+    ///
+    /// Uses `/items/top` (top-level items only). The local API's
+    /// `itemType=-attachment -note -annotation` negation is unreliable for
+    /// `format=versions` (it leaks child notes/annotations into the result),
+    /// which made the index churn over thousands of non-regular keys that never
+    /// produce chunks. Top-level items are exactly the papers/books/etc. plus a
+    /// handful of standalone notes/attachments, which the caller drops via
+    /// `is_regular_item()` after fetching full data.
     pub fn fetch_item_versions(&self) -> Result<HashMap<String, u64>> {
-        let url = format!(
-            "{}/items?format=versions&itemType=-attachment%20-note%20-annotation",
-            self.base_url
-        );
+        let url = format!("{}/items/top?format=versions", self.base_url);
         let resp = self
             .client
             .get(&url)
@@ -94,16 +99,32 @@ impl ZoteroClient {
         Ok(item)
     }
 
-    /// Fetch multiple items by keys (batched).
+    /// Fetch multiple items by keys.
+    ///
+    /// The local API's `?itemKey=k1,k2,...` returns the requested items **plus**
+    /// any child annotations of those items, and caps the response at `limit`.
+    /// A small `limit` therefore silently truncates real items out of the batch.
+    /// We use small key batches with generous headroom, keep only the keys we
+    /// actually asked for, and fall back to single-item fetches for anything
+    /// still missing -- so the result is exactly the requested items, no matter
+    /// how much annotation noise the API mixes in.
     pub fn fetch_items(&self, keys: &[String]) -> Result<Vec<ZoteroItem>> {
+        const KEY_BATCH: usize = 40;
+        // Headroom so child annotations returned alongside the batch cannot push
+        // a requested item past the limit.
+        const FETCH_LIMIT: usize = 500;
+
         let mut all_items = Vec::new();
-        for chunk in keys.chunks(PAGE_SIZE) {
-            let keys_str = chunk.join(",");
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for chunk in keys.chunks(KEY_BATCH) {
+            let want: std::collections::HashSet<&str> =
+                chunk.iter().map(|s| s.as_str()).collect();
             let url = format!(
                 "{}/items?itemKey={}&limit={}",
                 self.base_url,
-                keys_str,
-                chunk.len()
+                chunk.join(","),
+                FETCH_LIMIT,
             );
             let resp = self
                 .client
@@ -111,8 +132,24 @@ impl ZoteroClient {
                 .send()
                 .context("Failed to fetch items batch")?;
             let items: Vec<ZoteroItem> = resp.json().context("Failed to parse items batch")?;
-            all_items.extend(items);
+            for item in items {
+                if want.contains(item.key.as_str()) && seen.insert(item.key.clone()) {
+                    all_items.push(item);
+                }
+            }
         }
+
+        // Fallback for any requested key not returned by the batch endpoint
+        // (e.g. truncated by an unusually annotation-heavy batch).
+        for key in keys {
+            if !seen.contains(key) {
+                if let Ok(item) = self.fetch_item(key) {
+                    seen.insert(key.clone());
+                    all_items.push(item);
+                }
+            }
+        }
+
         Ok(all_items)
     }
 

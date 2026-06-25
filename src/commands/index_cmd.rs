@@ -7,6 +7,10 @@ use crate::index::{
 };
 use crate::output::{IndexStatusOutput, format_output};
 
+/// Commit + persist progress every this many regular items, so an interrupted
+/// run (crash, OOM, Ctrl-C) leaves a consistent index that the next run resumes.
+const CHECKPOINT_EVERY: usize = 20;
+
 pub fn run_index(force: bool, _json: bool) -> Result<()> {
     let client = ZoteroClient::new()?;
     let mut embedder = BgeSmallEmbedder::new()?;
@@ -63,7 +67,7 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
         eprintln!("Fetching {} items from Zotero...", to_add.len());
         let items = client.fetch_items(&to_add)?;
 
-        let writer = store.open_writer()?;
+        let mut writer = store.open_writer()?;
         let regular_items: Vec<_> = items.iter().filter(|i| i.is_regular_item()).collect();
         let total = regular_items.len();
 
@@ -135,6 +139,15 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
                 if let Some(version) = remote_versions.get(&item.key) {
                     indexed_versions.insert(item.key.clone(), *version);
                 }
+            }
+
+            // Periodic checkpoint: commit the tantivy writer, persist vectors +
+            // meta for everything indexed so far, then open a fresh writer.
+            if (i + 1) % CHECKPOINT_EVERY == 0 && i + 1 < total {
+                store.commit_writer(writer)?;
+                store.checkpoint(&remote_versions, &indexed_versions)?;
+                writer = store.open_writer()?;
+                eprintln!("\n  Checkpoint: {}/{} items committed", i + 1, total);
             }
         }
 

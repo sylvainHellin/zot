@@ -141,6 +141,13 @@ enum Commands {
         #[arg(long)]
         contains: Option<String>,
     },
+
+    /// (internal) Extract text from a single PDF in an isolated subprocess.
+    #[command(name = "__extract-pdf", hide = true)]
+    ExtractPdf {
+        /// Path to the PDF file
+        path: String,
+    },
 }
 
 fn main() {
@@ -208,6 +215,9 @@ fn main() {
         }
         Commands::Authors { contains } => {
             commands::authors_cmd::run_authors(contains.as_deref(), json)
+        }
+        Commands::ExtractPdf { path } => {
+            index::pdf::run_extract_worker(std::path::Path::new(&path))
         }
     };
 
