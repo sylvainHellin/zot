@@ -23,6 +23,47 @@ pub struct IndexMeta {
     pub items: HashMap<String, u64>, // key -> version
 }
 
+/// Difference between the remote Zotero library and the local index, computed
+/// from the two key -> version maps. `to_add` holds keys that are new or whose
+/// version changed remotely; `to_delete` holds keys present locally but gone
+/// remotely. Both `run_index` (which needs the keys) and the search-time
+/// staleness check (which needs the counts) share this one definition.
+#[derive(Debug, Clone, Default)]
+pub struct SyncDiff {
+    pub to_add: Vec<String>,
+    pub to_delete: Vec<String>,
+}
+
+impl SyncDiff {
+    /// True if the local index differs from the remote library.
+    pub fn is_stale(&self) -> bool {
+        !self.to_add.is_empty() || !self.to_delete.is_empty()
+    }
+}
+
+/// Diff a remote key -> version map against the local one.
+pub fn compute_sync_diff(
+    remote_versions: &HashMap<String, u64>,
+    local_versions: &HashMap<String, u64>,
+) -> SyncDiff {
+    let mut to_add = Vec::new();
+    for (key, remote_ver) in remote_versions {
+        match local_versions.get(key) {
+            Some(local_ver) if local_ver == remote_ver => {} // unchanged
+            _ => to_add.push(key.clone()),                   // new or updated
+        }
+    }
+
+    let mut to_delete = Vec::new();
+    for key in local_versions.keys() {
+        if !remote_versions.contains_key(key) {
+            to_delete.push(key.clone());
+        }
+    }
+
+    SyncDiff { to_add, to_delete }
+}
+
 /// Schema field handles for the tantivy index.
 struct Fields {
     chunk_id: Field,
@@ -907,6 +948,35 @@ mod tests {
             });
         }
         chunks
+    }
+
+    // compute_sync_diff classifies keys into new/updated (to_add) and removed
+    // (to_delete), and is_stale() reflects whether either is non-empty.
+    #[test]
+    fn compute_sync_diff_classifies_keys() {
+        let mut local = HashMap::new();
+        local.insert("SAME".to_string(), 3u64);
+        local.insert("CHANGED".to_string(), 3u64);
+        local.insert("GONE".to_string(), 9u64);
+
+        let mut remote = HashMap::new();
+        remote.insert("SAME".to_string(), 3u64); // unchanged
+        remote.insert("CHANGED".to_string(), 4u64); // version bumped
+        remote.insert("NEW".to_string(), 1u64); // new remotely
+        // GONE absent remotely -> removed.
+
+        let diff = compute_sync_diff(&remote, &local);
+
+        let mut add = diff.to_add.clone();
+        add.sort();
+        assert_eq!(add, vec!["CHANGED".to_string(), "NEW".to_string()]);
+        assert_eq!(diff.to_delete, vec!["GONE".to_string()]);
+        assert!(diff.is_stale());
+
+        // Identical maps -> not stale.
+        let clean = compute_sync_diff(&local, &local);
+        assert!(!clean.is_stale());
+        assert!(clean.to_add.is_empty() && clean.to_delete.is_empty());
     }
 
     // Regression test for vector-store duplication on re-ingest (issue #1, bug 2).

@@ -7,4 +7,6 @@ pub mod store;
 pub use chunker::{ItemText, chunk_item};
 pub use embedder::{BgeSmallEmbedder, Embedder};
 pub use reranker::{BgeRerankerBase, Reranker};
-pub use store::{ChunkData, IndexStore, IndexableItem, SearchFilters};
+pub use store::{
+    ChunkData, IndexStore, IndexableItem, SearchFilters, SyncDiff, compute_sync_diff,
+};

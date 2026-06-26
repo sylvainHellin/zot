@@ -3,7 +3,8 @@ use std::collections::HashMap;
 
 use crate::api::ZoteroClient;
 use crate::index::{
-    BgeSmallEmbedder, Embedder, IndexStore, IndexableItem, ItemText, chunk_item,
+    BgeSmallEmbedder, Embedder, IndexStore, IndexableItem, ItemText, SyncDiff, chunk_item,
+    compute_sync_diff,
 };
 use crate::output::{IndexStatusOutput, format_output};
 
@@ -28,21 +29,7 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
     let local_versions = store.item_versions().clone();
 
     // 2. Compute diff
-    let mut to_add: Vec<String> = Vec::new();
-    let mut to_delete: Vec<String> = Vec::new();
-
-    for (key, remote_ver) in &remote_versions {
-        match local_versions.get(key) {
-            Some(local_ver) if local_ver == remote_ver => {} // unchanged
-            _ => to_add.push(key.clone()),                   // new or updated
-        }
-    }
-
-    for key in local_versions.keys() {
-        if !remote_versions.contains_key(key) {
-            to_delete.push(key.clone());
-        }
-    }
+    let SyncDiff { to_add, to_delete } = compute_sync_diff(&remote_versions, &local_versions);
 
     let total_remote = remote_versions.len();
     eprintln!(
