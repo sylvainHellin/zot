@@ -22,6 +22,10 @@ pub struct SearchOutput {
     pub query: String,
     pub result_count: usize,
     pub results: Vec<SearchResultOutput>,
+    /// Index freshness note (stale index, or Zotero unreachable). Omitted from
+    /// JSON when there is nothing to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,10 +44,14 @@ pub struct SearchResultOutput {
 
 impl HumanDisplay for SearchOutput {
     fn human_display(&self) -> String {
-        let mut out = format!(
+        let mut out = String::new();
+        if let Some(note) = &self.note {
+            out.push_str(&format!("{note}\n\n"));
+        }
+        out.push_str(&format!(
             "Search: \"{}\"\nResults: {}\n",
             self.query, self.result_count
-        );
+        ));
         for (i, r) in self.results.iter().enumerate() {
             out.push_str(&format!(
                 "\n{}. [{}] {} (score: {:.3})\n   {} | {} | {}\n",

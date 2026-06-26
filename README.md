@@ -73,7 +73,7 @@ zot find "kalman filter" --everything
 | Command | Description |
 |---|---|
 | `zot index` | Build/update the local search index (incremental). `--force` for a full rebuild, `--status` to show index stats. |
-| `zot search <query>` | Hybrid semantic search (BM25 + vector) over the local index. |
+| `zot search <query>` | Hybrid semantic search (BM25 + vector) over the local index. Warns if the index is out of sync with Zotero (`--no-sync-check` to skip). |
 | `zot find <query>` | Live keyword search via the Zotero local API — always in sync, no index required. |
 | `zot get <key>` | Full metadata for an item. |
 | `zot fulltext <key>` | Stored fulltext for an item (from the local index). |
@@ -94,6 +94,20 @@ zot search "graph neural networks" \
   --limit 20 \
   --rerank            # apply BGE reranker for higher precision (slower)
 ```
+
+Before searching, `zot` makes one cheap call to Zotero to check whether the
+local index is still in sync (it diffs item versions, the same way `zot index`
+does). If the library has changed since the last `zot index`, it prints a note:
+
+```
+Note: index may be out of date -- 4 new/updated, 0 removed since last sync. Run `zot index` to update.
+```
+
+If Zotero is not reachable, the note instead says freshness could not be
+verified, and the search still runs against the local index. In `--json` mode
+the message is carried as a `note` field instead of printed. Skip the check with
+`--no-sync-check` (or `ZOT_NO_SYNC_CHECK=1`) for a fully offline, slightly faster
+search.
 
 ### `find` options
 

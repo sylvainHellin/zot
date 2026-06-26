@@ -58,6 +58,10 @@ enum Commands {
         /// Apply BGE reranker for higher precision (slower, downloads 1GB model on first use)
         #[arg(long)]
         rerank: bool,
+
+        /// Skip the "is the index up to date?" check against Zotero (faster, offline)
+        #[arg(long)]
+        no_sync_check: bool,
     },
 
     /// Keyword search via Zotero REST API (live, always in sync)
@@ -170,6 +174,7 @@ fn main() {
             collection,
             limit,
             rerank,
+            no_sync_check,
         } => commands::search_cmd::run_search(
             &query,
             tag.as_deref(),
@@ -178,6 +183,7 @@ fn main() {
             collection.as_deref(),
             limit,
             rerank,
+            no_sync_check,
             json,
         ),
         Commands::Find {
