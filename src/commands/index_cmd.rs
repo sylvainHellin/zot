@@ -205,9 +205,22 @@ fn extract_fulltext(client: &ZoteroClient, item_key: &str) -> Result<String> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.min(s.len())])
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_does_not_split_multibyte_characters() {
+        assert_eq!(truncate("Datenübergabe", 6), "Datenü...");
+        assert_eq!(truncate("short", 60), "short");
     }
 }
