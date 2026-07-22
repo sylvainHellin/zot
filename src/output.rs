@@ -265,6 +265,9 @@ pub struct IndexStatusOutput {
     pub chunk_count: usize,
     pub vector_count: usize,
     pub items_without_fulltext: usize,
+    /// Breakdown of extraction status across all indexed items, ordered for
+    /// display. Each entry is (status label, count).
+    pub status_breakdown: Vec<(String, usize)>,
     pub model_name: String,
     pub model_dim: usize,
     pub last_sync: String,
@@ -273,12 +276,18 @@ pub struct IndexStatusOutput {
 
 impl HumanDisplay for IndexStatusOutput {
     fn human_display(&self) -> String {
-        format!(
-            "Index Status\n  Items: {}\n  Chunks: {}\n  Vectors: {}\n  Items without fulltext: {}\n  Model: {} (dim {})\n  Last sync: {}\n  Data dir: {}",
-            self.item_count,
-            self.chunk_count,
-            self.vector_count,
-            self.items_without_fulltext,
+        let mut out = format!(
+            "Index Status\n  Items: {}\n  Chunks: {}\n  Vectors: {}\n  Items without fulltext: {}",
+            self.item_count, self.chunk_count, self.vector_count, self.items_without_fulltext,
+        );
+        if !self.status_breakdown.is_empty() {
+            out.push_str("\n  Extraction status:");
+            for (label, count) in &self.status_breakdown {
+                out.push_str(&format!("\n    {label}: {count}"));
+            }
+        }
+        out.push_str(&format!(
+            "\n  Model: {} (dim {})\n  Last sync: {}\n  Data dir: {}",
             self.model_name,
             self.model_dim,
             if self.last_sync.is_empty() {
@@ -287,6 +296,40 @@ impl HumanDisplay for IndexStatusOutput {
                 &self.last_sync
             },
             self.data_dir,
-        )
+        ));
+        out
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct IndexIssuesOutput {
+    pub count: usize,
+    pub issues: Vec<IndexIssueOutput>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IndexIssueOutput {
+    pub key: String,
+    pub title: String,
+    pub status: String,
+    pub detail: String,
+}
+
+impl HumanDisplay for IndexIssuesOutput {
+    fn human_display(&self) -> String {
+        if self.issues.is_empty() {
+            return "No extraction issues. Every indexed item has usable fulltext.".to_string();
+        }
+        let mut out = format!("Extraction issues: {}\n", self.count);
+        for issue in &self.issues {
+            out.push_str(&format!(
+                "\n[{}] {}\n  status: {}\n",
+                issue.key, issue.title, issue.status,
+            ));
+            if !issue.detail.is_empty() {
+                out.push_str(&format!("  detail: {}\n", issue.detail));
+            }
+        }
+        out
     }
 }

@@ -28,6 +28,10 @@ enum Commands {
         /// Show index status
         #[arg(long)]
         status: bool,
+
+        /// Sub-action (e.g. `issues` to list items with extraction problems)
+        #[command(subcommand)]
+        action: Option<IndexAction>,
     },
 
     /// Hybrid semantic search (BM25 + vector) using local index
@@ -154,18 +158,32 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum IndexAction {
+    /// List indexed items whose PDF extraction failed, was partial, looked
+    /// suspicious, or had no attachment.
+    Issues,
+}
+
 fn main() {
     let cli = Cli::parse();
     let json = cli.json;
 
     let result = match cli.command {
-        Commands::Index { force, status } => {
-            if status {
-                commands::index_cmd::run_index_status(json)
-            } else {
-                commands::index_cmd::run_index(force, json)
+        Commands::Index {
+            force,
+            status,
+            action,
+        } => match action {
+            Some(IndexAction::Issues) => commands::index_cmd::run_index_issues(json),
+            None => {
+                if status {
+                    commands::index_cmd::run_index_status(json)
+                } else {
+                    commands::index_cmd::run_index(force, json)
+                }
             }
-        }
+        },
         Commands::Search {
             query,
             tag,

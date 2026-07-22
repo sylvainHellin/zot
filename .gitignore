@@ -1,2 +1,4 @@
 /target
 /.fastembed_cache/*
+/.pi-subagents/
+/.agents/

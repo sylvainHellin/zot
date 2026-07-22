@@ -9,6 +9,26 @@ use tantivy::schema::*;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
 use super::chunker::{Chunk, ChunkType};
+use super::pdf::ExtractStatus;
+
+/// Per-item extraction status, persisted alongside the version checkpoint so
+/// `zot index status`/`issues` can report it and so failed/partial items are
+/// retried on the next run. Items indexed before status tracking existed simply
+/// have no entry here and are reported as "unknown".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemStatusRecord {
+    pub status: ExtractStatus,
+    /// Human-readable warning detail (empty for `ok`/`no-attachment`).
+    #[serde(default)]
+    pub detail: String,
+    /// Remote Zotero version this status was recorded at.
+    #[serde(default)]
+    pub version: u64,
+    /// Hash of the extracted text at index time, used to skip re-embedding when
+    /// a retry produces identical text (0 when there is no text).
+    #[serde(default)]
+    pub text_hash: u64,
+}
 
 /// Metadata about the index state, persisted to meta.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +41,10 @@ pub struct IndexMeta {
     pub item_count: usize,
     pub chunk_count: usize,
     pub items: HashMap<String, u64>, // key -> version
+    /// key -> extraction status. Added after `items`; absent for indexes built
+    /// before status tracking, hence `#[serde(default)]`.
+    #[serde(default)]
+    pub item_status: HashMap<String, ItemStatusRecord>,
 }
 
 /// Difference between the remote Zotero library and the local index, computed
@@ -233,6 +257,7 @@ impl IndexStore {
                 item_count: 0,
                 chunk_count: 0,
                 items: HashMap::new(),
+                item_status: HashMap::new(),
             }
         };
 
@@ -287,6 +312,42 @@ impl IndexStore {
         &self.meta.items
     }
 
+    /// Get stored per-item extraction status.
+    pub fn item_status(&self) -> &HashMap<String, ItemStatusRecord> {
+        &self.meta.item_status
+    }
+
+    /// Record the extraction status for an item (in memory; persisted by the
+    /// next checkpoint/finalize).
+    pub fn record_status(&mut self, key: &str, record: ItemStatusRecord) {
+        self.meta.item_status.insert(key.to_string(), record);
+    }
+
+    /// Look up the previously recorded status for an item, if any.
+    pub fn status_of(&self, key: &str) -> Option<&ItemStatusRecord> {
+        self.meta.item_status.get(key)
+    }
+
+    /// Keys that should be re-attempted next run even if their Zotero version is
+    /// unchanged: anything that previously failed, extracted partially, or
+    /// looked suspicious. Items with status `no-attachment` are intentionally
+    /// excluded here; they are only retried when their version changes (via
+    /// `compute_sync_diff`), so an attachment-less library does not re-run on
+    /// every invocation.
+    pub fn retry_keys(&self) -> Vec<String> {
+        self.meta
+            .item_status
+            .iter()
+            .filter(|(_, r)| {
+                matches!(
+                    r.status,
+                    ExtractStatus::Failed | ExtractStatus::Partial | ExtractStatus::Suspicious
+                )
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     /// Delete all data for specific item keys from the index.
     pub fn delete_items(&mut self, keys: &[String]) -> Result<()> {
         let mut writer: IndexWriter = self
@@ -297,6 +358,7 @@ impl IndexStore {
         for key in keys {
             writer.delete_term(Term::from_field_text(self.fields.item_key, key));
             self.meta.items.remove(key);
+            self.meta.item_status.remove(key);
 
             // Remove from vectors
             let mut i = 0;
@@ -446,6 +508,12 @@ impl IndexStore {
             persisted.insert(key.clone(), *version);
         }
         self.meta.items = persisted;
+
+        // Drop status entries for items no longer present remotely so the
+        // status map does not grow stale keys.
+        self.meta
+            .item_status
+            .retain(|k, _| remote_versions.contains_key(k));
     }
 
     /// Write the current in-memory state (vectors + meta) to disk atomically
@@ -480,6 +548,7 @@ impl IndexStore {
         self.vectors.clear();
         self.chunk_ids.clear();
         self.meta.items.clear();
+        self.meta.item_status.clear();
         self.meta.item_count = 0;
         self.meta.chunk_count = 0;
 
@@ -729,6 +798,16 @@ impl IndexStore {
         }
     }
 
+    /// True if the item is indexed and its metadata chunk carries non-empty
+    /// fulltext. Used to protect previously-good text from being overwritten by
+    /// a transient (empty) retry extraction.
+    pub fn has_fulltext(&self, item_key: &str) -> Result<bool> {
+        Ok(self
+            .get_fulltext(item_key)?
+            .map(|s| !s.is_empty())
+            .unwrap_or(false))
+    }
+
     /// Get the number of indexed vectors.
     pub fn vector_count(&self) -> usize {
         self.vectors.len()
@@ -763,6 +842,83 @@ impl IndexStore {
 
         Ok(count)
     }
+
+    /// Item keys that are indexed but have no stored fulltext AND no recorded
+    /// extraction status. These are items from before status tracking existed
+    /// whose PDF extraction previously failed or was skipped; they must be
+    /// re-attempted once so the new extractor reaches them (a one-time bootstrap;
+    /// after the retry they gain a status record and follow the normal path).
+    pub fn untracked_keys_without_fulltext(&self) -> Result<Vec<String>> {
+        let searcher = self.reader.searcher();
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.chunk_type, "metadata"),
+            IndexRecordOption::Basic,
+        );
+        let top_docs =
+            searcher.search(&query, &TopDocs::with_limit(self.chunk_ids.len().max(1)))?;
+
+        let mut keys = Vec::new();
+        for (_, doc_address) in top_docs {
+            let doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
+            let has_fulltext = doc
+                .get_first(self.fields.fulltext)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if has_fulltext {
+                continue;
+            }
+            if let Some(key) = doc.get_first(self.fields.item_key).and_then(|v| v.as_str()) {
+                if !self.meta.item_status.contains_key(key) {
+                    keys.push(key.to_string());
+                }
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Fetch the stored title for an item (from its metadata chunk). Empty if
+    /// the item is not indexed or has no title.
+    pub fn title_of(&self, item_key: &str) -> Result<String> {
+        let searcher = self.reader.searcher();
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.item_key, item_key),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.chunk_type, "metadata"),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
+        if let Some((_, doc_address)) = top_docs.first() {
+            let doc: tantivy::TantivyDocument = searcher.doc(*doc_address)?;
+            Ok(doc
+                .get_first(self.fields.title)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string())
+        } else {
+            Ok(String::new())
+        }
+    }
+}
+
+/// Stable hash of extracted text, used to skip re-embedding when a retry yields
+/// identical text. Uses the default hasher; only compared against itself within
+/// one machine's index, so cross-platform stability is not required.
+pub fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Filters applicable to both BM25 and vector search.
@@ -1122,6 +1278,43 @@ mod tests {
         let abc_count = store.chunk_ids.iter().filter(|c| c.starts_with("ABC")).count();
         assert_eq!(abcd_count, 3, "ABCD's vectors must not be purged by ABC");
         assert_eq!(abc_count, 5, "ABC's chunks (3 ABCD + 2 ABC) all start with ABC");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // has_fulltext reflects whether an item's metadata chunk carries non-empty
+    // fulltext. This is the guard index_cmd uses to keep previously-good text
+    // from being wiped by a transient (empty) retry extraction.
+    #[test]
+    fn has_fulltext_reflects_stored_fulltext() {
+        let dim = 3;
+        let dir = unique_temp_dir("has_fulltext");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        // Not indexed yet.
+        assert!(!store.has_fulltext("GOOD").unwrap());
+
+        // Item indexed with non-empty fulltext.
+        let good = make_chunks("GOOD", 1);
+        let emb_good: Vec<Vec<f32>> = (0..good.len()).map(|_| vec![0.1, 0.2, 0.3]).collect();
+        let writer = store.open_writer().unwrap();
+        store
+            .add_item(&writer, &indexable("GOOD"), &good, &emb_good, "real text")
+            .unwrap();
+        store.commit_writer(writer).unwrap();
+        store.reader.reload().unwrap();
+        assert!(store.has_fulltext("GOOD").unwrap());
+
+        // Item indexed with empty fulltext (extraction failed).
+        let empty = make_chunks("EMPTY", 1);
+        let emb_empty: Vec<Vec<f32>> = (0..empty.len()).map(|_| vec![0.4, 0.5, 0.6]).collect();
+        let writer = store.open_writer().unwrap();
+        store
+            .add_item(&writer, &indexable("EMPTY"), &empty, &emb_empty, "")
+            .unwrap();
+        store.commit_writer(writer).unwrap();
+        store.reader.reload().unwrap();
+        assert!(!store.has_fulltext("EMPTY").unwrap());
 
         fs::remove_dir_all(&dir).ok();
     }
