@@ -125,6 +125,13 @@ impl ZoteroItem {
         self.is_standalone_attachment() && self.data.content_type == "application/pdf"
     }
 
+    /// True for a top-level HTML snapshot attachment (no parent item). Zotero
+    /// stores saved web pages as `contentType == "text/html"`; these are
+    /// indexed by extracting readable text from their own file.
+    pub fn is_standalone_html_attachment(&self) -> bool {
+        self.is_standalone_attachment() && self.data.content_type == "text/html"
+    }
+
     /// True for a top-level note (no parent item).
     pub fn is_standalone_note(&self) -> bool {
         self.data.item_type == "note" && self.data.parent_item.is_empty()

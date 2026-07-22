@@ -28,7 +28,21 @@ pub struct ItemStatusRecord {
     /// a retry produces identical text (0 when there is no text).
     #[serde(default)]
     pub text_hash: u64,
+    /// Version of the extraction logic that produced this record. Bumped when a
+    /// new fulltext source is added (e.g. HTML snapshots in v0.2.2) so items
+    /// previously classified `no-attachment` are re-attempted once against the
+    /// new logic, without a forced rebuild. Absent (0) for records written
+    /// before this field existed.
+    #[serde(default)]
+    pub status_version: u32,
 }
+
+/// Current extraction-logic version. Bump when a new fulltext source is added
+/// so that `no-attachment` items recorded under an older version are re-queued
+/// once (see [`IndexStore::stale_no_attachment_keys`]).
+///   v1: PDF + note + standalone (v0.2.1)
+///   v2: + HTML snapshots (v0.2.2)
+pub const STATUS_VERSION: u32 = 2;
 
 /// Metadata about the index state, persisted to meta.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,8 +332,11 @@ impl IndexStore {
     }
 
     /// Record the extraction status for an item (in memory; persisted by the
-    /// next checkpoint/finalize).
-    pub fn record_status(&mut self, key: &str, record: ItemStatusRecord) {
+    /// next checkpoint/finalize). Stamps the record with the current
+    /// [`STATUS_VERSION`] so a later logic upgrade can identify and re-queue
+    /// stale `no-attachment` classifications.
+    pub fn record_status(&mut self, key: &str, mut record: ItemStatusRecord) {
+        record.status_version = STATUS_VERSION;
         self.meta.item_status.insert(key.to_string(), record);
     }
 
@@ -343,6 +360,23 @@ impl IndexStore {
                     r.status,
                     ExtractStatus::Failed | ExtractStatus::Partial | ExtractStatus::Suspicious
                 )
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// `no-attachment` items whose status was recorded under an older extraction
+    /// version than [`STATUS_VERSION`]. Re-queued once so a newly added fulltext
+    /// source (e.g. HTML snapshots) reaches items previously written off as
+    /// having no usable attachment, without a forced rebuild. After the retry
+    /// the record carries the current `status_version`, so an item that still
+    /// has no attachment is not re-queued on the next run.
+    pub fn stale_no_attachment_keys(&self) -> Vec<String> {
+        self.meta
+            .item_status
+            .iter()
+            .filter(|(_, r)| {
+                r.status == ExtractStatus::NoAttachment && r.status_version < STATUS_VERSION
             })
             .map(|(k, _)| k.clone())
             .collect()
@@ -1410,6 +1444,71 @@ mod tests {
             store.chunk_ids.iter().all(|c| c.starts_with("ABCD")),
             "ABCD's vectors must not be purged when deleting ABC",
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // stale_no_attachment_keys must return exactly the no-attachment items
+    // recorded under an older status version: not current-version ones, and
+    // not other statuses regardless of version.
+    #[test]
+    fn stale_no_attachment_keys_selects_only_outdated_no_attachment() {
+        let dim = 3;
+        let dir = unique_temp_dir("stale_na");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        let rec = |status: ExtractStatus, sv: u32| ItemStatusRecord {
+            status,
+            detail: String::new(),
+            version: 1,
+            text_hash: 0,
+            status_version: sv,
+        };
+
+        // Old-version no-attachment (pre-field records deserialize as 0): stale.
+        store
+            .meta
+            .item_status
+            .insert("OLD_NA".to_string(), rec(ExtractStatus::NoAttachment, 0));
+        // Current-version no-attachment: not stale.
+        store.meta.item_status.insert(
+            "CUR_NA".to_string(),
+            rec(ExtractStatus::NoAttachment, STATUS_VERSION),
+        );
+        // Old-version but not no-attachment: handled by retry_keys, not here.
+        store
+            .meta
+            .item_status
+            .insert("OLD_OK".to_string(), rec(ExtractStatus::Ok, 0));
+
+        let keys = store.stale_no_attachment_keys();
+        assert_eq!(keys, vec!["OLD_NA".to_string()]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // record_status must stamp the current STATUS_VERSION, so a re-attempted
+    // item stops appearing in stale_no_attachment_keys afterwards.
+    #[test]
+    fn record_status_stamps_current_status_version() {
+        let dim = 3;
+        let dir = unique_temp_dir("stamp_sv");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        store.record_status(
+            "KEY1",
+            ItemStatusRecord {
+                status: ExtractStatus::NoAttachment,
+                detail: String::new(),
+                version: 1,
+                text_hash: 0,
+                status_version: 0, // caller value is overridden by record_status
+            },
+        );
+
+        let rec = store.status_of("KEY1").unwrap();
+        assert_eq!(rec.status_version, STATUS_VERSION);
+        assert!(store.stale_no_attachment_keys().is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

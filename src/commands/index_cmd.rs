@@ -47,10 +47,14 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
         // two one-time bootstraps: pre-tracking items that are indexed but have
         // no fulltext (extraction failed before status tracking existed), and
         // version-recorded items with no metadata chunk at all (standalone
-        // attachments/notes skipped before v0.2.1).
+        // attachments/notes skipped before v0.2.1). Also `no-attachment` items
+        // recorded under an older extraction-logic version, so a newly added
+        // fulltext source (HTML snapshots in v0.2.2) reaches them once; after
+        // that they carry the current status version and stop re-queuing.
         let mut extra_set: HashSet<String> = store.retry_keys().into_iter().collect();
         extra_set.extend(store.untracked_keys_without_fulltext()?);
         extra_set.extend(store.keys_without_metadata_chunk()?);
+        extra_set.extend(store.stale_no_attachment_keys());
         let extra: Vec<String> = extra_set
             .into_iter()
             .filter(|k| remote_versions.contains_key(k) && !already.contains(k))
@@ -150,6 +154,7 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
                         detail: outcome.detail.clone(),
                         version,
                         text_hash: new_hash,
+                        status_version: 0,
                     },
                 );
                 indexed_versions.insert(item.key.clone(), version);
@@ -174,6 +179,7 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
                         detail: outcome.detail.clone(),
                         version,
                         text_hash: prev_hash,
+                        status_version: 0,
                     },
                 );
                 indexed_versions.insert(item.key.clone(), version);
@@ -221,6 +227,7 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
                     detail: outcome.detail.clone(),
                     version,
                     text_hash: new_hash,
+                    status_version: 0,
                 },
             );
 
@@ -353,25 +360,32 @@ fn is_indexable(item: &crate::api::ZoteroItem) -> bool {
 
 /// Resolve an item's fulltext and classify the outcome, dispatching on type:
 ///
-/// - a regular item: extract the first PDF child attachment;
+/// - a regular item: extract the first PDF child attachment, else the first
+///   HTML snapshot child attachment;
 /// - a top-level standalone PDF attachment: extract the item's own file;
+/// - a top-level standalone HTML snapshot attachment: extract readable text from
+///   its own file (mirrors the standalone-PDF path);
 /// - a top-level note: index the note body as plain text;
 /// - anything else that yields no fulltext: record `no-attachment` with a clear
 ///   detail so it never remains "unknown".
 ///
 /// A found PDF delegates to the isolated extractor, whose `ExtractStatus`
-/// (ok/failed/partial/suspicious) is passed through. A resolution error or the
-/// absence of a usable attachment yields `no-attachment`: not a warning, but
-/// eligible for retry only when the item's version changes.
+/// (ok/failed/partial/suspicious) is passed through. An HTML snapshot is parsed
+/// in-process via the readability extractor. A resolution error or the absence
+/// of a usable attachment yields `no-attachment`: not a warning, but eligible
+/// for retry only when the item's version changes.
 fn resolve_fulltext(client: &ZoteroClient, item: &crate::api::ZoteroItem) -> ExtractOutcome {
     if item.is_standalone_pdf_attachment() {
         return extract_own_pdf(client, &item.key);
+    }
+    if item.is_standalone_html_attachment() {
+        return extract_own_html(client, &item.key);
     }
     if item.is_standalone_note() {
         return note_outcome(&item.data.note);
     }
     if item.data.item_type == "attachment" {
-        // Top-level non-PDF attachment (e.g. text/html snapshot, text/plain):
+        // Top-level attachment of an unsupported type (e.g. text/plain, image):
         // extraction of these formats is out of scope. Record a clear status.
         let ct = if item.data.content_type.is_empty() {
             "unknown".to_string()
@@ -380,15 +394,20 @@ fn resolve_fulltext(client: &ZoteroClient, item: &crate::api::ZoteroItem) -> Ext
         };
         return no_attachment(&format!("standalone attachment ({ct}): not extractable"));
     }
-    extract_child_pdf(client, &item.key)
+    extract_child_fulltext(client, &item.key)
 }
 
-/// Extract the first PDF child attachment of a regular item.
-fn extract_child_pdf(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
+/// Extract a regular item's child fulltext, preferring a PDF child over an HTML
+/// snapshot child. A PDF is always preferred when present (even if it fails to
+/// extract, its status is reported). Only when no PDF child exists do we look
+/// for a saved HTML snapshot (`contentType == "text/html"`).
+fn extract_child_fulltext(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
     let children = match client.fetch_children(item_key) {
         Ok(c) => c,
         Err(_) => return no_attachment("could not fetch attachments"),
     };
+
+    // Prefer a PDF child: it is the richest source and always wins if present.
     for child in &children {
         if child.data.content_type == "application/pdf" {
             match client.get_attachment_path(&child.key) {
@@ -402,7 +421,24 @@ fn extract_child_pdf(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
             }
         }
     }
-    no_attachment("no PDF attachment found")
+
+    // No usable PDF child: fall back to an HTML snapshot child if one exists.
+    for child in &children {
+        if child.data.content_type == "text/html" {
+            match client.get_attachment_path(&child.key) {
+                Ok(Some(path)) => {
+                    let html_path = std::path::Path::new(&path);
+                    if html_path.exists() {
+                        return crate::index::html::extract_snapshot(html_path, "html snapshot");
+                    }
+                    return no_attachment("html snapshot: file missing on disk");
+                }
+                Ok(None) | Err(_) => {}
+            }
+        }
+    }
+
+    no_attachment("no PDF or HTML attachment found")
 }
 
 /// Extract a standalone PDF attachment's own file (the item is the attachment).
@@ -418,6 +454,23 @@ fn extract_own_pdf(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
         }
         Ok(None) => no_attachment("standalone PDF: no file resolved"),
         Err(_) => no_attachment("standalone PDF: could not resolve file path"),
+    }
+}
+
+/// Extract a standalone HTML snapshot attachment's own file (the item is the
+/// snapshot). Mirrors [`extract_own_pdf`] but runs the readability extractor.
+fn extract_own_html(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
+    match client.get_attachment_path(item_key) {
+        Ok(Some(path)) => {
+            let html_path = std::path::Path::new(&path);
+            if html_path.exists() {
+                crate::index::html::extract_snapshot(html_path, "standalone html snapshot")
+            } else {
+                no_attachment("standalone html snapshot: file missing on disk")
+            }
+        }
+        Ok(None) => no_attachment("standalone html snapshot: no file resolved"),
+        Err(_) => no_attachment("standalone html snapshot: could not resolve file path"),
     }
 }
 

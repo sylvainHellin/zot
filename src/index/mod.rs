@@ -1,5 +1,6 @@
 pub mod chunker;
 pub mod embedder;
+pub mod html;
 pub mod pdf;
 pub mod reranker;
 pub mod store;
