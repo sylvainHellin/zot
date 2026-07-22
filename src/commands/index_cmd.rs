@@ -43,11 +43,14 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
     let retry_count = {
         use std::collections::HashSet;
         let already: HashSet<String> = to_add.iter().cloned().collect();
-        // Status-tracked items that previously failed/partial/suspicious, plus a
-        // one-time bootstrap for pre-tracking items that are indexed but have no
-        // fulltext (extraction failed before status tracking existed).
+        // Status-tracked items that previously failed/partial/suspicious, plus
+        // two one-time bootstraps: pre-tracking items that are indexed but have
+        // no fulltext (extraction failed before status tracking existed), and
+        // version-recorded items with no metadata chunk at all (standalone
+        // attachments/notes skipped before v0.2.1).
         let mut extra_set: HashSet<String> = store.retry_keys().into_iter().collect();
         extra_set.extend(store.untracked_keys_without_fulltext()?);
+        extra_set.extend(store.keys_without_metadata_chunk()?);
         let extra: Vec<String> = extra_set
             .into_iter()
             .filter(|k| remote_versions.contains_key(k) && !already.contains(k))
@@ -82,16 +85,20 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
         let items = client.fetch_items(&to_add)?;
 
         let mut writer = store.open_writer()?;
-        let regular_items: Vec<_> = items.iter().filter(|i| i.is_regular_item()).collect();
+        // Indexable items are regular items plus top-level standalone PDF
+        // attachments and notes (the item itself carries the content). Other
+        // non-regular items (child annotations, non-PDF child attachments that
+        // slipped into the batch) are skipped but still version-recorded below.
+        let regular_items: Vec<_> = items.iter().filter(|i| is_indexable(i)).collect();
         let total = regular_items.len();
 
         // Invariant: any fetched item we deliberately skip due to type
-        // (attachment/note/annotation) must still be recorded with its remote
-        // version so finalize persists it and it does not perpetually re-queue
-        // in `to_add` on the next incremental run. Regular items that yielded
-        // zero chunks are intentionally NOT recorded here so the next run
-        // retries them; regular-item success/failure is handled below.
-        for item in items.iter().filter(|i| !i.is_regular_item()) {
+        // (annotations, non-indexable attachments) must still be recorded with
+        // its remote version so finalize persists it and it does not perpetually
+        // re-queue in `to_add` on the next incremental run. Regular items that
+        // yielded zero chunks are intentionally NOT recorded here so the next
+        // run retries them; indexable-item success/failure is handled below.
+        for item in items.iter().filter(|i| !is_indexable(i)) {
             if let Some(version) = remote_versions.get(&item.key) {
                 indexed_versions.insert(item.key.clone(), *version);
             }
@@ -105,8 +112,8 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
                 truncate(&item.data.title, 60),
             );
 
-            // Find PDF and extract text, classifying the outcome.
-            let outcome = extract_fulltext(&client, &item.key);
+            // Resolve fulltext (child PDF, own file, or note body) and classify.
+            let outcome = resolve_fulltext(&client, item);
             let fulltext = if outcome.text.is_empty() {
                 None
             } else {
@@ -336,14 +343,48 @@ pub fn run_index_issues(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Resolve an item's PDF attachment and extract text, classifying the outcome.
+/// True for items we index directly: regular items, plus top-level standalone
+/// attachments and notes. Standalone PDFs and notes carry extractable content;
+/// other standalone attachments (text/html, text/plain) still get a metadata
+/// chunk and a clear `no-attachment` status so nothing remains "unknown".
+fn is_indexable(item: &crate::api::ZoteroItem) -> bool {
+    item.is_regular_item() || item.is_standalone_attachment() || item.is_standalone_note()
+}
+
+/// Resolve an item's fulltext and classify the outcome, dispatching on type:
 ///
-/// A resolution error (Zotero API failure, missing/unreadable file) or the
-/// absence of any PDF child yields `no-attachment`: not a warning, but eligible
-/// for retry only when the item's version changes. A found PDF delegates to the
-/// isolated extractor, whose `ExtractStatus` (ok/failed/partial/suspicious) is
-/// passed through.
-fn extract_fulltext(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
+/// - a regular item: extract the first PDF child attachment;
+/// - a top-level standalone PDF attachment: extract the item's own file;
+/// - a top-level note: index the note body as plain text;
+/// - anything else that yields no fulltext: record `no-attachment` with a clear
+///   detail so it never remains "unknown".
+///
+/// A found PDF delegates to the isolated extractor, whose `ExtractStatus`
+/// (ok/failed/partial/suspicious) is passed through. A resolution error or the
+/// absence of a usable attachment yields `no-attachment`: not a warning, but
+/// eligible for retry only when the item's version changes.
+fn resolve_fulltext(client: &ZoteroClient, item: &crate::api::ZoteroItem) -> ExtractOutcome {
+    if item.is_standalone_pdf_attachment() {
+        return extract_own_pdf(client, &item.key);
+    }
+    if item.is_standalone_note() {
+        return note_outcome(&item.data.note);
+    }
+    if item.data.item_type == "attachment" {
+        // Top-level non-PDF attachment (e.g. text/html snapshot, text/plain):
+        // extraction of these formats is out of scope. Record a clear status.
+        let ct = if item.data.content_type.is_empty() {
+            "unknown".to_string()
+        } else {
+            item.data.content_type.clone()
+        };
+        return no_attachment(&format!("standalone attachment ({ct}): not extractable"));
+    }
+    extract_child_pdf(client, &item.key)
+}
+
+/// Extract the first PDF child attachment of a regular item.
+fn extract_child_pdf(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
     let children = match client.fetch_children(item_key) {
         Ok(c) => c,
         Err(_) => return no_attachment("could not fetch attachments"),
@@ -354,16 +395,7 @@ fn extract_fulltext(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
                 Ok(Some(path)) => {
                     let pdf_path = std::path::Path::new(&path);
                     if pdf_path.exists() {
-                        match crate::index::pdf::extract_text(pdf_path) {
-                            Ok(outcome) => return outcome,
-                            Err(e) => {
-                                return ExtractOutcome {
-                                    status: ExtractStatus::Failed,
-                                    text: String::new(),
-                                    detail: format!("malformed PDF: {e}"),
-                                };
-                            }
-                        }
+                        return run_pdf_extraction(pdf_path, "");
                     }
                 }
                 Ok(None) | Err(_) => {}
@@ -371,6 +403,56 @@ fn extract_fulltext(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
         }
     }
     no_attachment("no PDF attachment found")
+}
+
+/// Extract a standalone PDF attachment's own file (the item is the attachment).
+fn extract_own_pdf(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
+    match client.get_attachment_path(item_key) {
+        Ok(Some(path)) => {
+            let pdf_path = std::path::Path::new(&path);
+            if pdf_path.exists() {
+                run_pdf_extraction(pdf_path, "standalone PDF")
+            } else {
+                no_attachment("standalone PDF: file missing on disk")
+            }
+        }
+        Ok(None) => no_attachment("standalone PDF: no file resolved"),
+        Err(_) => no_attachment("standalone PDF: could not resolve file path"),
+    }
+}
+
+/// Run the isolated PDF extractor on a resolved path, tagging the detail with a
+/// source label (e.g. "standalone PDF") where helpful.
+fn run_pdf_extraction(pdf_path: &std::path::Path, source: &str) -> ExtractOutcome {
+    match crate::index::pdf::extract_text(pdf_path) {
+        Ok(mut outcome) => {
+            if !source.is_empty() && outcome.status == ExtractStatus::Ok && outcome.detail.is_empty()
+            {
+                outcome.detail = format!("{source}: extracted");
+            }
+            outcome
+        }
+        Err(e) => ExtractOutcome {
+            status: ExtractStatus::Failed,
+            text: String::new(),
+            detail: format!("malformed PDF: {e}"),
+        },
+    }
+}
+
+/// Turn a note's HTML body into an extraction outcome: strip tags to plain text.
+/// Non-empty notes are `Ok` (source "note content"); empty notes are recorded as
+/// `no-attachment` with an "empty note" detail so they do not remain "unknown".
+fn note_outcome(note_html: &str) -> ExtractOutcome {
+    let text = strip_html(note_html);
+    if text.is_empty() {
+        return no_attachment("empty note");
+    }
+    ExtractOutcome {
+        status: ExtractStatus::Ok,
+        text,
+        detail: "note content".to_string(),
+    }
 }
 
 fn no_attachment(detail: &str) -> ExtractOutcome {
@@ -381,10 +463,108 @@ fn no_attachment(detail: &str) -> ExtractOutcome {
     }
 }
 
+/// Minimal HTML-to-text: drop tags, decode a small set of common entities, and
+/// collapse whitespace. Deliberately lightweight (no HTML crate); good enough
+/// for Zotero note bodies, which are simple formatted HTML.
+fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                // Treat a closed tag as a soft break so words do not run together.
+                out.push(' ');
+            }
+            _ if in_tag => {}
+            _ => out.push(ch),
+        }
+    }
+    let decoded = decode_entities(&out);
+    // Collapse runs of whitespace (including the spaces injected for tags) into
+    // single spaces and trim.
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Decode the handful of HTML entities that show up in Zotero note bodies.
+/// Single left-to-right pass so decoded output is never rescanned: a literally
+/// escaped entity like `&amp;lt;` decodes to the text `&lt;`, not to `<`.
+fn decode_entities(s: &str) -> String {
+    const ENTITIES: [(&str, &str); 7] = [
+        ("&nbsp;", " "),
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&apos;", "'"),
+    ];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('&') {
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+        match ENTITIES.iter().find(|(e, _)| rest.starts_with(e)) {
+            Some((entity, replacement)) => {
+                out.push_str(replacement);
+                rest = &rest[entity.len()..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
         format!("{}...", &s[..max.min(s.len())])
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_html_removes_tags_and_collapses_whitespace() {
+        let html = "<div data-schema-version=\"9\"><h1>Title</h1>\n<p>Hello <b>world</b>.</p></div>";
+        assert_eq!(strip_html(html), "Title Hello world .");
+    }
+
+    #[test]
+    fn strip_html_decodes_common_entities() {
+        let html = "<p>Tom &amp; Jerry &lt;3 caf&#233;</p>";
+        // &#233; is not in the decoded set, so it is left as-is (rare in notes).
+        assert_eq!(strip_html(html), "Tom & Jerry <3 caf&#233;");
+        assert_eq!(strip_html("a&nbsp;b"), "a b");
+    }
+
+    #[test]
+    fn strip_html_amp_decoded_before_entity_bodies() {
+        // A literally-escaped entity (&amp;lt;) must survive as text, not become <.
+        assert_eq!(strip_html("x &amp;lt; y"), "x &lt; y");
+    }
+
+    #[test]
+    fn note_outcome_ok_for_nonempty_note() {
+        let outcome = note_outcome("<p>Some note body.</p>");
+        assert_eq!(outcome.status, ExtractStatus::Ok);
+        assert_eq!(outcome.text, "Some note body.");
+        assert_eq!(outcome.detail, "note content");
+    }
+
+    #[test]
+    fn note_outcome_empty_note_is_no_attachment() {
+        let outcome = note_outcome("<div></div>");
+        assert_eq!(outcome.status, ExtractStatus::NoAttachment);
+        assert!(outcome.text.is_empty());
+        assert_eq!(outcome.detail, "empty note");
     }
 }

@@ -59,6 +59,11 @@ pub struct ZoteroItemData {
     pub citation_key: String,
     #[serde(default, rename = "contentType")]
     pub content_type: String,
+    #[serde(default, rename = "parentItem")]
+    pub parent_item: String,
+    /// HTML body of a note item (empty for non-notes).
+    #[serde(default)]
+    pub note: String,
 
     // Catch any other fields we don't explicitly model
     #[serde(flatten)]
@@ -106,6 +111,23 @@ impl ZoteroItem {
             self.data.item_type.as_str(),
             "attachment" | "note" | "annotation"
         )
+    }
+
+    /// True for any top-level attachment (no parent item).
+    pub fn is_standalone_attachment(&self) -> bool {
+        self.data.item_type == "attachment" && self.data.parent_item.is_empty()
+    }
+
+    /// True for a top-level PDF attachment (the item itself is the file, with no
+    /// parent item). Such items are indexed by extracting their own file rather
+    /// than a child's.
+    pub fn is_standalone_pdf_attachment(&self) -> bool {
+        self.is_standalone_attachment() && self.data.content_type == "application/pdf"
+    }
+
+    /// True for a top-level note (no parent item).
+    pub fn is_standalone_note(&self) -> bool {
+        self.data.item_type == "note" && self.data.parent_item.is_empty()
     }
 
     pub fn creators_string(&self) -> String {

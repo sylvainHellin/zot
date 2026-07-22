@@ -877,6 +877,39 @@ impl IndexStore {
         Ok(keys)
     }
 
+    /// Item keys that have a recorded version but no metadata chunk in the
+    /// index. Before v0.2.1, top-level standalone attachments and notes were
+    /// version-recorded but never chunked, so incremental runs saw them as
+    /// unchanged and they stayed invisible (no fulltext, no status). Re-queue
+    /// them once; after indexing they carry a metadata chunk and follow the
+    /// normal path (analogous one-time bootstrap to
+    /// [`untracked_keys_without_fulltext`]).
+    pub fn keys_without_metadata_chunk(&self) -> Result<Vec<String>> {
+        let searcher = self.reader.searcher();
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.chunk_type, "metadata"),
+            IndexRecordOption::Basic,
+        );
+        let top_docs =
+            searcher.search(&query, &TopDocs::with_limit(self.chunk_ids.len().max(1)))?;
+
+        let mut have_chunk: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (_, doc_address) in top_docs {
+            let doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
+            if let Some(key) = doc.get_first(self.fields.item_key).and_then(|v| v.as_str()) {
+                have_chunk.insert(key.to_string());
+            }
+        }
+
+        Ok(self
+            .meta
+            .items
+            .keys()
+            .filter(|k| !have_chunk.contains(*k))
+            .cloned()
+            .collect())
+    }
+
     /// Fetch the stored title for an item (from its metadata chunk). Empty if
     /// the item is not indexed or has no title.
     pub fn title_of(&self, item_key: &str) -> Result<String> {
@@ -1315,6 +1348,33 @@ mod tests {
         store.commit_writer(writer).unwrap();
         store.reader.reload().unwrap();
         assert!(!store.has_fulltext("EMPTY").unwrap());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // keys_without_metadata_chunk finds version-recorded items with no metadata
+    // chunk (standalone attachments/notes skipped before v0.2.1) so they are
+    // re-queued once instead of requiring a --force rebuild.
+    #[test]
+    fn keys_without_metadata_chunk_finds_unchunked_items() {
+        let dim = 3;
+        let dir = unique_temp_dir("no_meta_chunk");
+        let mut store = IndexStore::open_at(dir.clone(), "TestModel", dim).unwrap();
+
+        // INDEXED has a metadata chunk; SKIPPED only has a recorded version.
+        let chunks = make_chunks("INDEXED", 1);
+        let emb: Vec<Vec<f32>> = (0..chunks.len()).map(|_| vec![0.1, 0.2, 0.3]).collect();
+        let writer = store.open_writer().unwrap();
+        store
+            .add_item(&writer, &indexable("INDEXED"), &chunks, &emb, "")
+            .unwrap();
+        store.commit_writer(writer).unwrap();
+        store.reader.reload().unwrap();
+        store.meta.items.insert("INDEXED".to_string(), 1);
+        store.meta.items.insert("SKIPPED".to_string(), 2);
+
+        let keys = store.keys_without_metadata_chunk().unwrap();
+        assert_eq!(keys, vec!["SKIPPED".to_string()]);
 
         fs::remove_dir_all(&dir).ok();
     }
