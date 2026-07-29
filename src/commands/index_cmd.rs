@@ -6,7 +6,9 @@ use crate::index::{
     BgeSmallEmbedder, Embedder, ExtractOutcome, ExtractStatus, IndexStore, IndexableItem,
     ItemStatusRecord, ItemText, SyncDiff, chunk_item, compute_sync_diff, text_hash,
 };
-use crate::output::{IndexIssueOutput, IndexIssuesOutput, IndexStatusOutput, format_output};
+use crate::output::{
+    IndexIssueOutput, IndexIssuesOutput, IndexStatusOutput, format_output, truncate_display,
+};
 
 /// Commit + persist progress every this many regular items, so an interrupted
 /// run (crash, OOM, Ctrl-C) leaves a consistent index that the next run resumes.
@@ -115,7 +117,7 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
                 "\r  [{}/{}] {} ",
                 i + 1,
                 total,
-                truncate(&item.data.title, 60),
+                truncate_display(&item.data.title, 60),
             );
 
             // Resolve fulltext (child PDF, own file, or note body) and classify.
@@ -323,7 +325,7 @@ pub fn run_index_issues(json: bool) -> Result<()> {
         let title = store.title_of(key).unwrap_or_default();
         issues.push(IndexIssueOutput {
             key: key.clone(),
-            title: truncate(&title, 80),
+            title: truncate_display(&title, 80),
             status: record.status.as_str().to_string(),
             detail: record.detail.clone(),
         });
@@ -545,6 +547,10 @@ fn strip_html(html: &str) -> String {
 /// Decode the handful of HTML entities that show up in Zotero note bodies.
 /// Single left-to-right pass so decoded output is never rescanned: a literally
 /// escaped entity like `&amp;lt;` decodes to the text `&lt;`, not to `<`.
+#[allow(
+    clippy::string_slice,
+    reason = "indices come from find('&') and the ASCII entity lengths that follow it"
+)]
 fn decode_entities(s: &str) -> String {
     const ENTITIES: [(&str, &str); 7] = [
         ("&nbsp;", " "),
@@ -575,13 +581,6 @@ fn decode_entities(s: &str) -> String {
     out
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.min(s.len())])
-    } else {
-        s.to_string()
-    }
-}
 
 #[cfg(test)]
 mod tests {

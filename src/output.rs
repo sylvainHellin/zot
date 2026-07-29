@@ -15,6 +15,21 @@ pub trait HumanDisplay {
     fn human_display(&self) -> String;
 }
 
+/// Shorten a string for display, appending `...` when anything was cut.
+///
+/// `max` counts characters, not bytes. Byte slicing (`&s[..60]`) panics when
+/// the cut lands inside a multibyte character, which is why a title, snippet,
+/// or abstract containing `ü`, `é`, or a dash could crash the whole command.
+pub fn truncate_display(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
+}
+
 // ---- Output data types ----
 
 #[derive(Debug, Serialize)]
@@ -65,11 +80,7 @@ impl HumanDisplay for SearchOutput {
             ));
             if !r.snippet.is_empty() {
                 // Truncate snippet for display
-                let snippet = if r.snippet.len() > 200 {
-                    format!("{}...", &r.snippet[..200])
-                } else {
-                    r.snippet.clone()
-                };
+                let snippet = truncate_display(&r.snippet, 200);
                 out.push_str(&format!("   > {}\n", snippet.replace('\n', " ")));
             }
             if r.chunk_type == "fulltext" {
@@ -176,11 +187,7 @@ impl HumanDisplay for ItemOutput {
             out.push_str(&format!("Tags: {}\n", self.tags.join(", ")));
         }
         if !self.abstract_note.is_empty() {
-            let abs = if self.abstract_note.len() > 500 {
-                format!("{}...", &self.abstract_note[..500])
-            } else {
-                self.abstract_note.clone()
-            };
+            let abs = truncate_display(&self.abstract_note, 500);
             out.push_str(&format!("\nAbstract:\n{}\n", abs));
         }
         out
@@ -452,5 +459,43 @@ impl HumanDisplay for IndexIssuesOutput {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_display;
+
+    #[test]
+    fn short_string_is_unchanged() {
+        assert_eq!(truncate_display("Hello", 60), "Hello");
+        assert_eq!(truncate_display("", 60), "");
+    }
+
+    #[test]
+    fn long_string_is_cut_and_marked() {
+        assert_eq!(truncate_display("abcdef", 3), "abc...");
+    }
+
+    #[test]
+    fn exact_length_is_not_marked() {
+        assert_eq!(truncate_display("abc", 3), "abc");
+    }
+
+    #[test]
+    fn cut_inside_multibyte_char_does_not_panic() {
+        // Regression: byte slicing panicked with "byte index 60 is not a char
+        // boundary" on titles like this one (github.com/sylvainHellin/zot#2).
+        let title = "Bauüberwachung und Qualitätssicherung für Grünflächen in München";
+        let out = truncate_display(title, 60);
+        assert_eq!(out.chars().count(), 63); // 60 chars + "..."
+        assert!(title.starts_with(out.trim_end_matches('.')));
+    }
+
+    #[test]
+    fn counts_characters_not_bytes() {
+        // 4 chars, 8 bytes: a byte-based limit would cut this in half.
+        assert_eq!(truncate_display("üäöß", 4), "üäöß");
+        assert_eq!(truncate_display("üäöß", 2), "üä...");
     }
 }

@@ -151,6 +151,10 @@ fn strip_and_cap(html: &str) -> String {
 /// Strip HTML to text, dropping the contents of `<script>` and `<style>`
 /// elements entirely (a raw snapshot is full of both). Decodes common entities
 /// and collapses whitespace.
+#[allow(
+    clippy::string_slice,
+    reason = "every index comes from find/starts_with on the same &str, so it is already a char boundary"
+)]
 fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let bytes = html.as_bytes();
@@ -188,6 +192,10 @@ fn strip_html(html: &str) -> String {
 /// If an opening `<tag ...>` starts at `pos` in `lower`, return the byte index
 /// just past its matching `</tag>` (or end of input). Used to drop the entire
 /// body of `<script>`/`<style>`.
+#[allow(
+    clippy::string_slice,
+    reason = "pos is a char boundary supplied by strip_html's find loop, and open is ASCII"
+)]
 fn skip_raw_block(lower: &str, pos: usize, tag: &str) -> Option<usize> {
     let open = format!("<{tag}");
     if !lower[pos..].starts_with(&open) {
@@ -210,6 +218,10 @@ fn skip_raw_block(lower: &str, pos: usize, tag: &str) -> Option<usize> {
 
 /// Decode the handful of HTML entities common in article bodies. Single
 /// left-to-right pass so decoded output is never rescanned.
+#[allow(
+    clippy::string_slice,
+    reason = "indices come from find('&') and the ASCII entity lengths that follow it"
+)]
 fn decode_entities(s: &str) -> String {
     const ENTITIES: [(&str, &str); 8] = [
         ("&nbsp;", " "),

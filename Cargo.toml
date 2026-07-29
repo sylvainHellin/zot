@@ -5,6 +5,15 @@ edition = "2021"
 description = "CLI for querying Zotero libraries with hybrid semantic search"
 license = "MIT"
 
+[lints.clippy]
+# Byte-indexing a `str` panics when the index lands inside a multibyte
+# character, which crashed `zot index` on titles containing "ü" and silently
+# returned the wrong window from `zot fulltext`. Slice by character instead
+# (`chars().skip(..).take(..)`), or annotate the function with an
+# `#[allow(clippy::string_slice, reason = "...")]` explaining why the index is
+# known to be a char boundary (e.g. it came from `find`).
+string_slice = "warn"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }

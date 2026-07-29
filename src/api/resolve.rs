@@ -33,6 +33,10 @@ impl Identifier {
 
 /// Parse a user-supplied identifier. Accepts bare DOIs, doi.org URLs,
 /// `arXiv:ID`, bare arXiv IDs (new-style `2401.12345`), and arxiv.org URLs.
+#[allow(
+    clippy::string_slice,
+    reason = "the index comes from find(\"arxiv.org/\"), an ASCII match, so it is a char boundary"
+)]
 pub fn parse_identifier(input: &str) -> Result<Identifier> {
     let s = input.trim();
 
@@ -93,6 +97,10 @@ fn looks_like_arxiv_id(s: &str) -> bool {
         && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "the index comes from rfind('v'), an ASCII match, so it is a char boundary"
+)]
 fn strip_arxiv_version(s: &str) -> String {
     if let Some(pos) = s.rfind('v') {
         if pos > 0 && s[pos + 1..].chars().all(|c| c.is_ascii_digit()) && !s[pos + 1..].is_empty() {

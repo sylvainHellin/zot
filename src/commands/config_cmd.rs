@@ -31,6 +31,10 @@ pub fn run_show(json: bool) -> Result<()> {
     print_config(&cfg, None, json)
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "Zotero API keys are ASCII alphanumeric, so byte and char indices coincide"
+)]
 fn print_config(cfg: &Config, note: Option<&str>, json: bool) -> Result<()> {
     let masked = cfg.api_key.as_deref().map(|k| {
         if k.len() > 6 {
