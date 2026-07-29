@@ -1,24 +1,18 @@
 # zot
 
-A CLI for querying **and maintaining** your local
-[Zotero](https://www.zotero.org/) library: hybrid semantic search (BM25
-keyword + vector embeddings, with an optional reranker), plus write commands
-to add papers by DOI/arXiv or PDF, edit metadata, attach files, and trash
-items.
+A CLI for querying and maintaining your local [Zotero](https://www.zotero.org/) library.
+It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv or PDF, edit metadata, attach files, and trash items.
 
-`zot` talks to the **Zotero local HTTP API** (the desktop app's built-in server
-at `http://localhost:23119`), so your library never leaves your machine and no
-Zotero web API key is required. For semantic search it builds a local index
-(embeddings + a Tantivy full-text index) on disk.
+`zot` talks to the Zotero local HTTP API (the desktop app's built-in server at `http://localhost:23119`), so the library never leaves the machine and no Zotero web API key is required for reading.
+For semantic search it builds a local index (embeddings plus a Tantivy full-text index) on disk.
 
 ## Requirements
 
-- **Rust toolchain** (`cargo`) — install via [rustup](https://rustup.rs/).
-- **Zotero desktop** running, with the local API enabled:
-  *Settings → Advanced → "Allow other applications on this computer to
-  communicate with Zotero"*. The app must be open when you run `zot`.
-- First use of `--rerank` downloads a ~1 GB BGE reranker model (cached by
-  `fastembed`); the default embedding model is small and downloads automatically.
+- Rust toolchain (`cargo`), installed via [rustup](https://rustup.rs/).
+- Zotero desktop running, with the local API enabled under *Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"*.
+  The app must be open when you run `zot`.
+- First use of `--rerank` downloads a BGE reranker model of about 1 GB (cached by `fastembed`).
+  The default embedding model is small and downloads automatically.
 
 ## Install
 
@@ -30,13 +24,11 @@ cd zot
 cargo install --path .
 ```
 
-This builds an optimized release binary and places it on your `PATH` at
-`~/.cargo/bin/zot` (make sure `~/.cargo/bin` is on your `PATH`).
+This builds an optimized release binary and places it on your `PATH` at `~/.cargo/bin/zot`, so make sure `~/.cargo/bin` is on your `PATH`.
 
 ### Update an existing install
 
-Pull the latest changes and reinstall with `--force` (required — without it,
-cargo refuses because the package is already installed):
+Pull the latest changes and reinstall with `--force`, which is required because cargo otherwise refuses to overwrite an already installed package:
 
 ```bash
 cd zot
@@ -44,11 +36,8 @@ git pull
 cargo install --path . --force
 ```
 
-`--force` overwrites the existing `~/.cargo/bin/zot` binary in place.
-
-> **Tip:** after updating, it's worth refreshing your local index
-> (`zot index`) so it reflects any indexing fixes. If you suspect stale data,
-> do a full rebuild with `zot index --force`.
+After updating it is worth refreshing the local index with `zot index` so it picks up any indexing fixes.
+If you suspect stale data, do a full rebuild with `zot index --force`.
 
 ### Build without installing
 
@@ -79,23 +68,23 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 
 | Command | Description |
 |---|---|
-| `zot index` | Build/update the local search index (incremental). `--force` for a full rebuild, `--status` to show index stats. |
-| `zot search <query>` | Hybrid semantic search (BM25 + vector) over the local index. Warns if the index is out of sync with Zotero (`--no-sync-check` to skip). |
-| `zot find <query>` | Live keyword search via the Zotero local API — always in sync, no index required. |
+| `zot index` | Build or update the local search index (incremental). `--force` for a full rebuild, `--status` for index stats and an extraction-status breakdown. |
+| `zot index issues` | List every item whose fulltext extraction has a problem (key, title, status, reason). |
+| `zot search <query>` | Hybrid semantic search (BM25 plus vector) over the local index. Warns if the index is out of sync with Zotero; `--no-sync-check` skips the check. |
+| `zot find <query>` | Live keyword search via the Zotero local API, always in sync and requiring no index. |
 | `zot get <key>` | Full metadata for an item. |
-| `zot fulltext <key>` | Stored fulltext for an item (from the local index). |
+| `zot fulltext <key>` | Stored fulltext for an item, from the local index. `--start`, `--end`, and `--max-chars` return a slice. |
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
-| `zot tags` | List tags in the library. |
-| `zot authors` | List authors/creators in the library. |
-| `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF (local, via Zotero's connector API). |
-| `zot edit <key>` | Update item metadata (web API + sync). |
-| `zot attach <key> <file>` | Attach a file to an existing item (web API + sync). |
-| `zot rm <key>...` | Move items to the Zotero trash (web API + sync; restorable). |
+| `zot tags` | List tags in the library; `--contains` filters. |
+| `zot authors` | List authors and creators in the library; `--contains` filters. |
+| `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF, locally via Zotero's connector API. |
+| `zot edit <key>` | Update item metadata (web API plus sync). |
+| `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
+| `zot rm <key>...` | Move items to the Zotero trash (web API plus sync, restorable). |
 | `zot config` | One-time setup of the Zotero web API key for the write commands. |
 
-Add `--json` to any command for machine-readable output (pipe to `jq`).
-Note for scripts: progress/log lines go to stderr; only the result JSON is on
-stdout — don't merge the streams with `2>&1` before parsing.
+Add `--json` to any command for machine-readable output, ready to pipe into `jq`.
+For scripts, note that progress and log lines go to stderr while only the result JSON goes to stdout, so do not merge the streams with `2>&1` before parsing.
 
 ### `search` options
 
@@ -109,19 +98,16 @@ zot search "graph neural networks" \
   --rerank            # apply BGE reranker for higher precision (slower)
 ```
 
-Before searching, `zot` makes one cheap call to Zotero to check whether the
-local index is still in sync (it diffs item versions, the same way `zot index`
-does). If the library has changed since the last `zot index`, it prints a note:
+Before searching, `zot` makes one cheap call to Zotero to check whether the local index is still in sync, diffing item versions the same way `zot index` does.
+If the library has changed since the last `zot index`, it prints a note:
 
 ```
 Note: index may be out of date -- 4 new/updated, 0 removed since last sync. Run `zot index` to update.
 ```
 
-If Zotero is not reachable, the note instead says freshness could not be
-verified, and the search still runs against the local index. In `--json` mode
-the message is carried as a `note` field instead of printed. Skip the check with
-`--no-sync-check` (or `ZOT_NO_SYNC_CHECK=1`) for a fully offline, slightly faster
-search.
+If Zotero is not reachable, the note instead says freshness could not be verified, and the search still runs against the local index.
+In `--json` mode the message is carried as a `note` field instead of printed.
+Skip the check with `--no-sync-check` (or `ZOT_NO_SYNC_CHECK=1`) for a fully offline, slightly faster search.
 
 ### `find` options
 
@@ -139,14 +125,29 @@ zot find "transformer" \
 ```bash
 zot index            # incremental sync (only changed/new items)
 zot index --force    # full rebuild from scratch
-zot index --status   # show item/chunk/vector counts, model, last sync, data dir
+zot index --status   # item/chunk/vector counts, extraction-status breakdown, data dir
+zot index issues     # list items with extraction problems and the reason
 ```
+
+Fulltext is extracted from local Zotero data only, in this order per item:
+a PDF attachment (child or standalone), a locally stored HTML snapshot, or the note body for top-level notes.
+Nothing is ever fetched from the network; to make a URL-only item searchable, attach a snapshot in Zotero (drag the browser address-bar icon onto the item) and re-run `zot index`.
+
+Every item carries a persisted extraction status shown by `--status` and detailed by `issues`:
+
+| Status | Meaning |
+| --- | --- |
+| `ok` | fulltext extracted and indexed |
+| `partial` | some PDF pages failed; the rest is indexed |
+| `suspicious` | extraction reported success but yielded implausibly little text (e.g. a scanned PDF with no text layer) |
+| `failed` | the file could not be processed (malformed, password-locked) |
+| `no-attachment` | nothing local to extract from |
+
+Items with `failed`, `partial`, or `suspicious` status are retried automatically on the next `zot index` run.
 
 ## Adding papers (`zot add`)
 
-`zot add` writes through the **local** connector API (the same endpoints the
-browser connector uses), so it needs no account, no API key, and no sync —
-just the running Zotero app.
+`zot add` writes through the local connector API, the same endpoints the browser connector uses, so it needs no account, no API key, and no sync, just the running Zotero app.
 
 ```bash
 zot add 10.1038/nature14539                 # DOI (also doi.org URLs)
@@ -163,29 +164,19 @@ zot add ... --no-index                      # skip the automatic index refresh
 
 Behavior worth knowing:
 
-- **Duplicate guard:** before adding, the identifier is checked against the
-  library (DOI/URL/extra fields). If it matches, the add is refused with the
-  existing item's key — use `--force` to override.
-- **PDF recognition:** with `--pdf`, the file is saved and Zotero's metadata
-  recognizer creates the parent item (waits until recognition finishes). If an
-  identifier was also given it is only used for the duplicate check and as a
-  metadata fallback when recognition fails — verify the recognized metadata
-  matches. If recognition fails entirely, the PDF is kept as a standalone
-  attachment and (when an identifier was given) the metadata is imported
-  separately; join them with `zot attach` or in the Zotero UI.
-- **Index refresh:** after a successful add, the search index updates
-  incrementally so the paper is immediately findable via `zot search`.
-- **No local delete:** the connector API cannot remove items, so a mistaken
-  add must be undone with `zot rm` (web API) or in the Zotero UI.
-- Identifiers beyond DOI/arXiv (ISBN, PubMed, plain URLs) are on the roadmap
-  (see `BACKLOG.md`).
+- Duplicate guard: before adding, the identifier is checked against the library (DOI, URL, extra fields).
+  If it matches, the add is refused and reports the existing item's key; `--force` overrides.
+- PDF recognition: with `--pdf`, the file is saved and Zotero's metadata recognizer creates the parent item, waiting until recognition finishes.
+  An identifier given alongside the PDF is used only for the duplicate check and as a metadata fallback when recognition fails, so verify that the recognized metadata matches.
+  If recognition fails entirely, the PDF is kept as a standalone attachment and, when an identifier was given, the metadata is imported separately; join them with `zot attach` or in the Zotero UI.
+- Index refresh: after a successful add, the search index updates incrementally so the paper is immediately findable via `zot search`.
+- No local delete: the connector API cannot remove items, so a mistaken add must be undone with `zot rm` (web API) or in the Zotero UI.
+- Identifiers beyond DOI and arXiv (ISBN, PubMed, plain URLs) are on the roadmap, see `BACKLOG.md`.
 
 ## Editing the library (`zot edit`, `zot attach`, `zot rm`)
 
-Zotero's local API is **read-only**, so everything that modifies *existing*
-items goes through the Zotero **web API** (api.zotero.org) and reaches the
-local library on the next sync (usually seconds with auto-sync on). This
-requires Zotero sync and a one-time key setup:
+Zotero's local API is read-only, so everything that modifies existing items goes through the Zotero web API (api.zotero.org) and reaches the local library on the next sync, usually within seconds when auto-sync is on.
+This requires Zotero sync and a one-time key setup:
 
 ```bash
 # Create a key with write access at https://www.zotero.org/settings/keys
@@ -203,38 +194,32 @@ zot attach A1B2C3D4 paper.pdf --title "Preprint PDF"
 zot rm A1B2C3D4 E5F6G7H8         # moves to trash (restorable in the UI)
 ```
 
-`--set` uses Zotero field names (`title`, `date`, `DOI`, `abstractNote`,
-`publicationTitle`, ...); unknown fields are rejected by the API. Edits use
-optimistic concurrency (version-checked; retried once on conflict). `zot rm`
-never deletes permanently — items go to the Zotero trash.
+`--set` uses Zotero field names (`title`, `date`, `DOI`, `abstractNote`, `publicationTitle`, and so on), and unknown fields are rejected by the API.
+Edits use optimistic concurrency: they are version-checked and retried once on conflict.
+`zot rm` never deletes permanently, items go to the Zotero trash.
 
-Note: an item created locally moments ago (e.g. via `zot add`) must sync up
-before `edit`/`attach`/`rm` can see it; if you get "not found on
-api.zotero.org", sync Zotero and retry.
+An item created locally moments ago, for example via `zot add`, must sync up before `edit`, `attach`, or `rm` can see it.
+If you get "not found on api.zotero.org", sync Zotero and retry.
 
 ## Where data lives
 
-The local index is stored in the platform data directory, on Linux:
+The local index is stored in the platform data directory, `~/Library/Application Support/zot/` on macOS and `~/.local/share/zot/` on Linux:
 
 ```
-~/.local/share/zot/
   ├── meta.json      # index metadata (model, sync state)
   ├── tantivy/       # BM25 full-text index
   └── vectors.bin    # embedding vectors
 ```
 
-The web API key lives in the platform config directory
-(`~/.config/zot/config.json` on Linux).
+The web API key lives in the platform config directory, the same directory on macOS and `~/.config/zot/config.json` on Linux.
 
-To reset the index completely, delete that directory (or run `zot index --force`).
+To reset the index completely, delete the data directory or run `zot index --force`.
 
 ## Troubleshooting
 
-- **"Could not reach Zotero. Is it running?"** — the Zotero desktop app isn't
-  open or the local API is disabled. Open Zotero and enable the setting under
-  *Settings → Advanced*.
-- **Search returns nothing / looks stale** — run `zot index` to sync, or
-  `zot index --force` for a clean rebuild.
+- "Could not reach Zotero. Is it running?" means the Zotero desktop app is not open or the local API is disabled.
+  Open Zotero and enable the setting under *Settings → Advanced*.
+- Search that returns nothing or looks stale usually means a stale index: run `zot index` to sync, or `zot index --force` for a clean rebuild.
 
 ## License
 
