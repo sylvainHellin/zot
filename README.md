@@ -1,8 +1,10 @@
 # zot
 
-A CLI for querying your local [Zotero](https://www.zotero.org/) library with
-hybrid semantic search (BM25 keyword + vector embeddings, with an optional
-reranker).
+A CLI for querying **and maintaining** your local
+[Zotero](https://www.zotero.org/) library: hybrid semantic search (BM25
+keyword + vector embeddings, with an optional reranker), plus write commands
+to add papers by DOI/arXiv or PDF, edit metadata, attach files, and trash
+items.
 
 `zot` talks to the **Zotero local HTTP API** (the desktop app's built-in server
 at `http://localhost:23119`), so your library never leaves your machine and no
@@ -66,6 +68,11 @@ zot search "diffusion models for point clouds"
 
 # 3. Live keyword search straight from Zotero (no index needed)
 zot find "kalman filter" --everything
+
+# 4. Add a paper by DOI or arXiv ID (also refreshes the index)
+zot add 10.1145/361598.361623 --tag to-read
+zot add arXiv:2401.12345 --collection "Large Language Models"
+zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 ```
 
 ## Commands
@@ -80,8 +87,15 @@ zot find "kalman filter" --everything
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
 | `zot tags` | List tags in the library. |
 | `zot authors` | List authors/creators in the library. |
+| `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF (local, via Zotero's connector API). |
+| `zot edit <key>` | Update item metadata (web API + sync). |
+| `zot attach <key> <file>` | Attach a file to an existing item (web API + sync). |
+| `zot rm <key>...` | Move items to the Zotero trash (web API + sync; restorable). |
+| `zot config` | One-time setup of the Zotero web API key for the write commands. |
 
 Add `--json` to any command for machine-readable output (pipe to `jq`).
+Note for scripts: progress/log lines go to stderr; only the result JSON is on
+stdout — don't merge the streams with `2>&1` before parsing.
 
 ### `search` options
 
@@ -128,6 +142,76 @@ zot index --force    # full rebuild from scratch
 zot index --status   # show item/chunk/vector counts, model, last sync, data dir
 ```
 
+## Adding papers (`zot add`)
+
+`zot add` writes through the **local** connector API (the same endpoints the
+browser connector uses), so it needs no account, no API key, and no sync —
+just the running Zotero app.
+
+```bash
+zot add 10.1038/nature14539                 # DOI (also doi.org URLs)
+zot add arXiv:2401.12345                    # arXiv ID (also arxiv.org URLs)
+zot add --pdf paper.pdf                     # PDF only: Zotero's recognizer
+                                            # creates the metadata item
+zot add 10.1000/xyz --pdf paper.pdf         # PDF + identifier (see below)
+zot add ... --collection KMHNIPDA           # collection key, exact name, or
+                                            # tree-view ID (default: library root)
+zot add ... --tag agents --tag to-read      # tags on the new item
+zot add ... --force                         # skip the duplicate guard
+zot add ... --no-index                      # skip the automatic index refresh
+```
+
+Behavior worth knowing:
+
+- **Duplicate guard:** before adding, the identifier is checked against the
+  library (DOI/URL/extra fields). If it matches, the add is refused with the
+  existing item's key — use `--force` to override.
+- **PDF recognition:** with `--pdf`, the file is saved and Zotero's metadata
+  recognizer creates the parent item (waits until recognition finishes). If an
+  identifier was also given it is only used for the duplicate check and as a
+  metadata fallback when recognition fails — verify the recognized metadata
+  matches. If recognition fails entirely, the PDF is kept as a standalone
+  attachment and (when an identifier was given) the metadata is imported
+  separately; join them with `zot attach` or in the Zotero UI.
+- **Index refresh:** after a successful add, the search index updates
+  incrementally so the paper is immediately findable via `zot search`.
+- **No local delete:** the connector API cannot remove items, so a mistaken
+  add must be undone with `zot rm` (web API) or in the Zotero UI.
+- Identifiers beyond DOI/arXiv (ISBN, PubMed, plain URLs) are on the roadmap
+  (see `BACKLOG.md`).
+
+## Editing the library (`zot edit`, `zot attach`, `zot rm`)
+
+Zotero's local API is **read-only**, so everything that modifies *existing*
+items goes through the Zotero **web API** (api.zotero.org) and reaches the
+local library on the next sync (usually seconds with auto-sync on). This
+requires Zotero sync and a one-time key setup:
+
+```bash
+# Create a key with write access at https://www.zotero.org/settings/keys
+zot config set-key <API-KEY>     # stored + validated once; rerun to rotate
+zot config show                  # config path, masked key, user ID
+```
+
+The `ZOTERO_API_KEY` env var overrides the stored key when set.
+
+```bash
+zot edit A1B2C3D4 --set date=2024 --set "publicationTitle=Nature"
+zot edit A1B2C3D4 --add-tag reviewed --rm-tag to-read
+zot edit A1B2C3D4 --patch '{"creators":[{"creatorType":"author","firstName":"Ada","lastName":"Lovelace"}]}'
+zot attach A1B2C3D4 paper.pdf --title "Preprint PDF"
+zot rm A1B2C3D4 E5F6G7H8         # moves to trash (restorable in the UI)
+```
+
+`--set` uses Zotero field names (`title`, `date`, `DOI`, `abstractNote`,
+`publicationTitle`, ...); unknown fields are rejected by the API. Edits use
+optimistic concurrency (version-checked; retried once on conflict). `zot rm`
+never deletes permanently — items go to the Zotero trash.
+
+Note: an item created locally moments ago (e.g. via `zot add`) must sync up
+before `edit`/`attach`/`rm` can see it; if you get "not found on
+api.zotero.org", sync Zotero and retry.
+
 ## Where data lives
 
 The local index is stored in the platform data directory, on Linux:
@@ -138,6 +222,9 @@ The local index is stored in the platform data directory, on Linux:
   ├── tantivy/       # BM25 full-text index
   └── vectors.bin    # embedding vectors
 ```
+
+The web API key lives in the platform config directory
+(`~/.config/zot/config.json` on Linux).
 
 To reset the index completely, delete that directory (or run `zot index --force`).
 

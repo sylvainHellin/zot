@@ -1,5 +1,6 @@
 mod api;
 mod commands;
+mod config;
 mod index;
 mod output;
 mod search;
@@ -150,12 +151,101 @@ enum Commands {
         contains: Option<String>,
     },
 
+    /// Add a paper to the library (by DOI/arXiv identifier and/or PDF)
+    Add {
+        /// Identifier: DOI (10.xxxx/..., doi.org URL) or arXiv ID/URL
+        identifier: Option<String>,
+
+        /// PDF file to save (with an identifier: used with Zotero's
+        /// recognizer; alone: metadata is recognized from the PDF)
+        #[arg(long)]
+        pdf: Option<String>,
+
+        /// Target collection (key, exact name, or tree-view ID like C42).
+        /// Default: library root.
+        #[arg(long)]
+        collection: Option<String>,
+
+        /// Tag(s) to set on the new item (repeatable)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+
+        /// Add even if the identifier already matches items in the library
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the automatic search-index refresh after adding
+        #[arg(long)]
+        no_index: bool,
+    },
+
+    /// Update metadata of an existing item (via Zotero web API + sync)
+    Edit {
+        /// Zotero item key
+        key: String,
+
+        /// Set a field: --set field=value (repeatable; Zotero field names,
+        /// e.g. title, date, publicationTitle, DOI, abstractNote)
+        #[arg(long = "set")]
+        sets: Vec<String>,
+
+        /// Add a tag (repeatable)
+        #[arg(long = "add-tag")]
+        add_tags: Vec<String>,
+
+        /// Remove a tag (repeatable)
+        #[arg(long = "rm-tag")]
+        rm_tags: Vec<String>,
+
+        /// Raw JSON object merged into the item data (for complex fields,
+        /// e.g. '{"creators":[...]}')
+        #[arg(long)]
+        patch: Option<String>,
+    },
+
+    /// Attach a file to an existing item (via Zotero web API + sync)
+    Attach {
+        /// Zotero item key of the parent item
+        key: String,
+
+        /// File to attach (PDF, EPUB, ...)
+        file: String,
+
+        /// Attachment title (default: filename)
+        #[arg(long)]
+        title: Option<String>,
+    },
+
+    /// Move items to the Zotero trash (via Zotero web API + sync)
+    Rm {
+        /// Zotero item key(s)
+        #[arg(required = true)]
+        keys: Vec<String>,
+    },
+
+    /// Configure zot (Zotero web API key for write commands)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// (internal) Extract text from a single PDF in an isolated subprocess.
     #[command(name = "__extract-pdf", hide = true)]
     ExtractPdf {
         /// Path to the PDF file
         path: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Store the Zotero web API key (create one at zotero.org/settings/keys)
+    SetKey {
+        /// API key with write access
+        key: String,
+    },
+    /// Show the stored configuration (key is masked)
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -240,6 +330,37 @@ fn main() {
         Commands::Authors { contains } => {
             commands::authors_cmd::run_authors(contains.as_deref(), json)
         }
+        Commands::Add {
+            identifier,
+            pdf,
+            collection,
+            tags,
+            force,
+            no_index,
+        } => commands::add_cmd::run_add(commands::add_cmd::AddArgs {
+            identifier: identifier.as_deref(),
+            pdf: pdf.as_deref(),
+            collection: collection.as_deref(),
+            tags,
+            force,
+            no_index,
+            json,
+        }),
+        Commands::Edit {
+            key,
+            sets,
+            add_tags,
+            rm_tags,
+            patch,
+        } => commands::edit_cmd::run_edit(&key, &sets, &add_tags, &rm_tags, patch.as_deref(), json),
+        Commands::Attach { key, file, title } => {
+            commands::attach_cmd::run_attach(&key, &file, title.as_deref(), json)
+        }
+        Commands::Rm { keys } => commands::rm_cmd::run_rm(&keys, json),
+        Commands::Config { action } => match action {
+            ConfigAction::SetKey { key } => commands::config_cmd::run_set_key(&key, json),
+            ConfigAction::Show => commands::config_cmd::run_show(json),
+        },
         Commands::ExtractPdf { path } => {
             index::pdf::run_extract_worker(std::path::Path::new(&path))
         }

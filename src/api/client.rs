@@ -263,6 +263,38 @@ impl ZoteroClient {
         Ok(items)
     }
 
+    /// Fetch all collections in the library (paginated).
+    pub fn fetch_collections(&self) -> Result<Vec<super::models::ZoteroCollection>> {
+        let mut all = Vec::new();
+        let mut start = 0;
+        loop {
+            let url = format!(
+                "{}/collections?limit={}&start={}",
+                self.base_url, PAGE_SIZE, start
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .context("Failed to fetch collections")?;
+            let total: usize = resp
+                .headers()
+                .get("Total-Results")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let cols: Vec<super::models::ZoteroCollection> =
+                resp.json().context("Failed to parse collections")?;
+            let count = cols.len();
+            all.extend(cols);
+            start += count;
+            if count == 0 || start >= total {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     /// Fetch all tags from the library.
     pub fn fetch_tags(&self) -> Result<Vec<TagInfo>> {
         let mut all_tags = Vec::new();

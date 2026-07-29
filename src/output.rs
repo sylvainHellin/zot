@@ -302,6 +302,127 @@ impl HumanDisplay for IndexStatusOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AddOutput {
+    pub added: Vec<AddedItemOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddedItemOutput {
+    pub key: String,
+    pub title: String,
+    pub item_type: String,
+    pub creators: String,
+    pub date: String,
+    pub doi: String,
+}
+
+impl HumanDisplay for AddOutput {
+    fn human_display(&self) -> String {
+        let mut out = String::new();
+        if self.added.is_empty() {
+            out.push_str("No new items detected.\n");
+        } else {
+            out.push_str(&format!("Added {} item(s):\n", self.added.len()));
+            for item in &self.added {
+                out.push_str(&format!(
+                    "\n[{}] {}\n   {} | {} | {}\n",
+                    item.key, item.title, item.creators, item.date, item.item_type,
+                ));
+                if !item.doi.is_empty() {
+                    out.push_str(&format!("   DOI: {}\n", item.doi));
+                }
+            }
+        }
+        for w in &self.warnings {
+            out.push_str(&format!("\nWarning: {w}\n"));
+        }
+        out
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EditOutput {
+    pub key: String,
+    pub version: u64,
+    pub changed: Vec<String>,
+    pub note: String,
+}
+
+impl HumanDisplay for EditOutput {
+    fn human_display(&self) -> String {
+        format!(
+            "Updated [{}] (new version {})\n  Changed: {}\n  {}",
+            self.key,
+            self.version,
+            self.changed.join(", "),
+            self.note,
+        )
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttachOutput {
+    pub key: String,
+    pub parent_title: String,
+    pub attachment_key: String,
+    pub filename: String,
+    pub note: String,
+}
+
+impl HumanDisplay for AttachOutput {
+    fn human_display(&self) -> String {
+        format!(
+            "Attached {} to [{}] {}\n  Attachment key: {}\n  {}",
+            self.filename, self.key, self.parent_title, self.attachment_key, self.note,
+        )
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RmOutput {
+    pub trashed: Vec<String>,
+    pub note: String,
+}
+
+impl HumanDisplay for RmOutput {
+    fn human_display(&self) -> String {
+        format!("Trashed: {}\n  {}", self.trashed.join(", "), self.note)
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigOutput {
+    pub path: String,
+    pub api_key: Option<String>,
+    pub user_id: Option<u64>,
+    pub env_override: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl HumanDisplay for ConfigOutput {
+    fn human_display(&self) -> String {
+        let mut out = format!("Config: {}\n", self.path);
+        out.push_str(&format!(
+            "  API key: {}\n",
+            self.api_key.as_deref().unwrap_or("(not set)")
+        ));
+        if let Some(id) = self.user_id {
+            out.push_str(&format!("  User ID: {id}\n"));
+        }
+        if self.env_override {
+            out.push_str("  Note: ZOTERO_API_KEY env var is set and overrides the stored key.\n");
+        }
+        if let Some(note) = &self.note {
+            out.push_str(&format!("  {note}\n"));
+        }
+        out
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct IndexIssuesOutput {
     pub count: usize,
     pub issues: Vec<IndexIssueOutput>,

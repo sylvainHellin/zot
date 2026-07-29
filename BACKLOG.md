@@ -1,5 +1,23 @@
 # Backlog
 
+## More `zot add` identifier types -- ISBN, PubMed, plain URL
+
+`zot add` supports DOI and arXiv today. Worth adding later:
+
+- **ISBN**: no content-negotiation service; OpenLibrary
+  (`https://openlibrary.org/isbn/<isbn>.json`) or Google Books, mapped to
+  BibTeX before `/connector/import`.
+- **PubMed ID (PMID/PMCID)**: NCBI E-utilities (`efetch` with
+  `rettype=medline`) or the idconv API to get a DOI, then the existing DOI
+  path.
+- **Plain URL**: hardest -- needs Zotero's web translators. The connector's
+  `/connector/saveSnapshot` saves a webpage item without translation; real
+  translator-based saving expects the connector to run the translator
+  browser-side. A translation-server sidecar would cover this properly.
+
+Origin: 2026-07-27, write-support work; deferred per review of
+PLAN-write-support.md.
+
 ## zot export -- export items to BibTeX / RIS / CSL-JSON
 
 Add an `export` subcommand that serializes items to a bibliography format, so a
