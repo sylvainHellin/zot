@@ -16,12 +16,14 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
     let client = ZoteroClient::new()?;
     let mut embedder = BgeSmallEmbedder::new()?;
 
-    let mut store = IndexStore::open_or_create(embedder.name(), embedder.dim())?;
-
-    if force {
+    // --force recreates from scratch without loading the existing index, so
+    // it also recovers from a corrupted index that cannot be opened.
+    let mut store = if force {
         eprintln!("Force rebuild: clearing existing index...");
-        store.clear()?;
-    }
+        IndexStore::recreate(embedder.name(), embedder.dim())?
+    } else {
+        IndexStore::open_or_create(embedder.name(), embedder.dim())?
+    };
 
     // 1. Fetch current versions from Zotero
     eprintln!("Fetching item versions from Zotero...");

@@ -219,6 +219,28 @@ impl IndexStore {
         Self::open_at(base_dir, model_name, model_dim)
     }
 
+    /// Delete all on-disk index state and create a fresh, empty store.
+    ///
+    /// Used by `zot index --force`: it must not require the existing index to
+    /// be loadable, so a corrupted index (e.g. from a hard kill mid-write on
+    /// an older version without atomic writes) can always be rebuilt.
+    pub fn recreate(model_name: &str, model_dim: usize) -> Result<Self> {
+        let base_dir = Self::data_dir()?;
+        for file in ["vectors.bin", "vectors.bin.tmp", "meta.json", "meta.json.tmp"] {
+            let p = base_dir.join(file);
+            if p.exists() {
+                fs::remove_file(&p)
+                    .with_context(|| format!("Failed to remove {}", p.display()))?;
+            }
+        }
+        let tantivy_dir = base_dir.join("tantivy");
+        if tantivy_dir.exists() {
+            fs::remove_dir_all(&tantivy_dir)
+                .with_context(|| format!("Failed to remove {}", tantivy_dir.display()))?;
+        }
+        Self::open_at(base_dir, model_name, model_dim)
+    }
+
     /// Open or create an index rooted at a specific base directory.
     fn open_at(base_dir: PathBuf, model_name: &str, model_dim: usize) -> Result<Self> {
         let tantivy_dir = base_dir.join("tantivy");
@@ -286,7 +308,13 @@ impl IndexStore {
 
         // Load vectors
         let (vectors, chunk_ids) = if vectors_path.exists() {
-            load_vectors(&vectors_path, model_dim)?
+            load_vectors(&vectors_path, model_dim).with_context(|| {
+                format!(
+                    "Corrupted vector index at {} (likely an interrupted index run). \
+                     Run `zot index --force` to rebuild.",
+                    vectors_path.display()
+                )
+            })?
         } else {
             (Vec::new(), Vec::new())
         };
@@ -565,33 +593,10 @@ impl IndexStore {
         )?;
 
         let meta_str = serde_json::to_string_pretty(&self.meta)?;
-        fs::write(self.base_dir.join("meta.json"), meta_str)?;
-
-        Ok(())
-    }
-
-    /// Clear the entire index for a force rebuild.
-    pub fn clear(&mut self) -> Result<()> {
-        let mut writer: IndexWriter = self
-            .index
-            .writer(50_000_000)
-            .context("Failed to create index writer")?;
-        writer.delete_all_documents()?;
-        writer.commit()?;
-
-        self.vectors.clear();
-        self.chunk_ids.clear();
-        self.meta.items.clear();
-        self.meta.item_status.clear();
-        self.meta.item_count = 0;
-        self.meta.chunk_count = 0;
-
-        // Persist the emptied state immediately. The tantivy deletion above is
-        // already committed to disk; if we crash before finalize without doing
-        // this, the stale meta.json/vectors.bin would make the next run believe
-        // the (now-empty) index is full and skip everything.
-        self.reader.reload()?;
-        self.write_to_disk()?;
+        // Atomic replace for the same crash-safety reason as save_vectors.
+        let meta_tmp = self.base_dir.join("meta.json.tmp");
+        fs::write(&meta_tmp, meta_str)?;
+        fs::rename(&meta_tmp, self.base_dir.join("meta.json"))?;
 
         Ok(())
     }
@@ -1088,6 +1093,10 @@ fn chunk_belongs_to(chunk_id: &str, key: &str) -> bool {
 }
 
 /// Save vectors and chunk IDs to a binary file.
+///
+/// Written to a `.tmp` sibling and atomically renamed into place, so a crash
+/// or SIGKILL mid-write can never leave a truncated `vectors.bin` behind
+/// (which would make the store unopenable).
 fn save_vectors(
     path: &Path,
     vectors: &[Vec<f32>],
@@ -1095,7 +1104,8 @@ fn save_vectors(
     dim: usize,
 ) -> Result<()> {
     use std::io::Write;
-    let mut file = fs::File::create(path)?;
+    let tmp_path = path.with_extension("bin.tmp");
+    let mut file = fs::File::create(&tmp_path)?;
 
     let count = vectors.len() as u32;
     let dim = dim as u32;
@@ -1116,6 +1126,9 @@ fn save_vectors(
         }
     }
 
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
