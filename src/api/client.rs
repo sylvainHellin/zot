@@ -7,6 +7,56 @@ use super::models::ZoteroItem;
 const DEFAULT_BASE_URL: &str = "http://localhost:23119/api/users/0";
 const PAGE_SIZE: usize = 100;
 
+/// Maximum number of item keys per rendered-export request.
+///
+/// `limit` windows *rows*, and on `/items` a row is any item at all, child
+/// attachments and notes included. Those children never render as a
+/// bibliography entry, so a batch whose children overflow the window silently
+/// loses real entries: 40 keys at `limit=25` rendered 15 entries, at `limit=50`
+/// 21, and only at `limit=500` all 40. The rendered endpoints below therefore
+/// use `/items/top`, which excludes children, so `Total-Results` is exactly the
+/// number of matched top-level items and no window arithmetic is guesswork.
+/// Probed against the live library up to 100 keys (100 in, 100 entries out);
+/// 50 keeps the URL short with headroom.
+pub const FORMAT_KEY_BATCH: usize = 50;
+
+/// A bibliography format the Zotero local API renders server-side.
+///
+/// All three come back as `text/plain`, CSL JSON included, so they are read as
+/// text rather than deserialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    Bibtex,
+    Ris,
+    CslJson,
+}
+
+impl ExportFormat {
+    /// The value the local API's `format=` query parameter expects.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Bibtex => "bibtex",
+            Self::Ris => "ris",
+            Self::CslJson => "csljson",
+        }
+    }
+}
+
+impl std::str::FromStr for ExportFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "bibtex" | "bib" => Ok(Self::Bibtex),
+            "ris" => Ok(Self::Ris),
+            "csljson" | "csl-json" => Ok(Self::CslJson),
+            other => bail!(
+                "Unknown export format \"{other}\". Valid values: bibtex, ris, csljson."
+            ),
+        }
+    }
+}
+
 pub struct ZoteroClient {
     client: Client,
     base_url: String,
@@ -151,6 +201,127 @@ impl ZoteroClient {
         }
 
         Ok(all_items)
+    }
+
+    /// Fetch a batch of items rendered as a bibliography.
+    ///
+    /// One HTTP request; the caller batches, because attribution depends on
+    /// knowing which keys went into which response (entries carry a citation
+    /// key that has no relation to the Zotero item key). At most
+    /// [`FORMAT_KEY_BATCH`] keys per call.
+    pub fn fetch_items_formatted(&self, keys: &[String], format: ExportFormat) -> Result<String> {
+        if keys.is_empty() {
+            return Ok(String::new());
+        }
+        if keys.len() > FORMAT_KEY_BATCH {
+            bail!(
+                "Rendered export takes at most {FORMAT_KEY_BATCH} keys per request, got {}",
+                keys.len()
+            );
+        }
+        let url = format!(
+            "{}/items/top?itemKey={}&limit={}&format={}",
+            self.base_url,
+            keys.join(","),
+            FORMAT_KEY_BATCH,
+            format.as_param(),
+        );
+        Ok(self.fetch_rendered(&url)?.0)
+    }
+
+    /// Fetch a collection's top-level items rendered as a bibliography
+    /// (paginated), returning one body per page for the caller to merge.
+    ///
+    /// Direct members only, matching every other `--collection` filter in the
+    /// CLI; subcollections are not walked.
+    pub fn fetch_collection_items_formatted(
+        &self,
+        collection_key: &str,
+        format: ExportFormat,
+    ) -> Result<Vec<String>> {
+        let mut bodies = Vec::new();
+        let mut start = 0;
+        loop {
+            let url = format!(
+                "{}/collections/{}/items/top?limit={}&start={}&format={}",
+                self.base_url,
+                collection_key,
+                PAGE_SIZE,
+                start,
+                format.as_param(),
+            );
+            let (body, total) = self.fetch_rendered(&url)?;
+            if !body.trim().is_empty() {
+                bodies.push(body);
+            }
+            // Advance by the window, not by the entries returned: the
+            // translator drops items it cannot render (a standalone
+            // attachment, say), so a page can hold fewer entries than rows.
+            start += PAGE_SIZE;
+            if start >= total {
+                break;
+            }
+        }
+        Ok(bodies)
+    }
+
+    /// Fetch a collection's top-level items as JSON (paginated).
+    ///
+    /// The rendered formats carry no item keys, so the export path needs this
+    /// alongside them to know which items it asked for and to name any the
+    /// translator drops.
+    pub fn fetch_collection_top_items(&self, collection_key: &str) -> Result<Vec<ZoteroItem>> {
+        let mut all_items = Vec::new();
+        let mut start = 0;
+        loop {
+            let url = format!(
+                "{}/collections/{}/items/top?limit={}&start={}",
+                self.base_url, collection_key, PAGE_SIZE, start
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .context(format!("Failed to fetch items of collection {collection_key}"))?;
+            let total: usize = resp
+                .headers()
+                .get("Total-Results")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let items: Vec<ZoteroItem> = resp
+                .json()
+                .context(format!("Failed to parse items of collection {collection_key}"))?;
+            let count = items.len();
+            all_items.extend(items);
+            start += count;
+            if count == 0 || start >= total {
+                break;
+            }
+        }
+        Ok(all_items)
+    }
+
+    /// GET a rendered export, returning the body and its `Total-Results`.
+    fn fetch_rendered(&self, url: &str) -> Result<(String, usize)> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .context("Failed to fetch rendered export")?;
+        let status = resp.status();
+        let total: usize = resp
+            .headers()
+            .get("Total-Results")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        // `text()`, not `json()`: every rendered format is served as text/plain.
+        let body = resp.text().context("Failed to read rendered export")?;
+        if !status.is_success() {
+            bail!("Zotero returned {status} rendering the export: {}", body.trim());
+        }
+        Ok((body, total))
     }
 
     /// Fetch all regular items (paginated).

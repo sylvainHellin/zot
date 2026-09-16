@@ -4,6 +4,7 @@ pub mod authors_cmd;
 pub mod collections_cmd;
 pub mod config_cmd;
 pub mod edit_cmd;
+pub mod export_cmd;
 pub mod find_cmd;
 pub mod fulltext_cmd;
 pub mod get_cmd;

@@ -118,7 +118,7 @@ pub fn run_collections(
 /// Fetch the connector's save targets, degrading to none when the connector is
 /// unreachable (Zotero closed, or the connector port taken), which must not
 /// break a command that only wanted them to resolve a reference.
-fn connector_targets(tree_ids: bool) -> Vec<SaveTarget> {
+pub fn connector_targets(tree_ids: bool) -> Vec<SaveTarget> {
     match ConnectorClient::new().and_then(|c| c.list_targets()) {
         Ok(targets) => targets,
         Err(e) => {

@@ -41,6 +41,11 @@ pub struct SearchOutput {
     /// JSON when there is nothing to report.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Bibliography rendered from the results by `--export`. Present, human
+    /// output is the bibliography alone; in JSON it rides along with the
+    /// results so stdout stays one document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export: Option<ExportOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +64,11 @@ pub struct SearchResultOutput {
 
 impl HumanDisplay for SearchOutput {
     fn human_display(&self) -> String {
+        // `--export` asked for a bibliography, so that is the whole payload;
+        // the freshness note and progress lines already go to stderr.
+        if let Some(export) = &self.export {
+            return export.human_display();
+        }
         let mut out = String::new();
         if let Some(note) = &self.note {
             out.push_str(&format!("{note}\n\n"));
@@ -91,6 +101,53 @@ impl HumanDisplay for SearchOutput {
             }
         }
         out
+    }
+}
+
+/// Result of a rendered bibliography export.
+#[derive(Debug, Serialize)]
+pub struct ExportOutput {
+    /// `bibtex`, `ris` or `csljson`.
+    pub format: String,
+    /// Items asked for (explicit keys, collection members, or search hits).
+    pub requested: usize,
+    /// Entries the translator actually produced.
+    pub exported: usize,
+    /// Requested items with no entry in the output, named so the gap is
+    /// actionable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<DroppedItemOutput>,
+    /// Path written by `--output`; `null` when the bibliography went to stdout.
+    /// Always serialised, so the document shape does not vary between runs.
+    pub path: Option<String>,
+    /// The bibliography itself; `null` once `path` is set, since the file is
+    /// then the payload and duplicating it would double a large export.
+    /// Always serialised, so exactly one of `path` and `content` is non-null.
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DroppedItemOutput {
+    pub key: String,
+    pub title: String,
+    /// Why nothing was rendered: the item is absent from the library, or the
+    /// translator refused it.
+    pub reason: String,
+}
+
+impl HumanDisplay for ExportOutput {
+    fn human_display(&self) -> String {
+        match (&self.path, &self.content) {
+            (Some(path), _) => {
+                if self.exported == 1 {
+                    format!("Wrote 1 entry to {path}")
+                } else {
+                    format!("Wrote {} entries to {path}", self.exported)
+                }
+            }
+            (None, Some(content)) => content.clone(),
+            (None, None) => String::new(),
+        }
     }
 }
 
@@ -686,7 +743,20 @@ impl HumanDisplay for IndexIssuesOutput {
 
 #[cfg(test)]
 mod tests {
-    use super::{CollectionCreatedOutput, HumanDisplay, format_output, truncate_display};
+    use super::{
+        CollectionCreatedOutput, ExportOutput, HumanDisplay, format_output, truncate_display,
+    };
+
+    fn export(exported: usize, path: Option<&str>, content: Option<&str>) -> ExportOutput {
+        ExportOutput {
+            format: "bibtex".to_string(),
+            requested: exported,
+            exported,
+            dropped: Vec::new(),
+            path: path.map(str::to_string),
+            content: content.map(str::to_string),
+        }
+    }
 
     fn created(parent: Option<(&str, &str)>, synced_local: bool) -> CollectionCreatedOutput {
         CollectionCreatedOutput {
@@ -758,5 +828,38 @@ mod tests {
         // 4 chars, 8 bytes: a byte-based limit would cut this in half.
         assert_eq!(truncate_display("üäöß", 4), "üäöß");
         assert_eq!(truncate_display("üäöß", 2), "üä...");
+    }
+
+    #[test]
+    fn an_export_to_a_file_reports_the_path() {
+        let out = export(11, Some("/tmp/acc.bib"), None);
+        assert_eq!(out.human_display(), "Wrote 11 entries to /tmp/acc.bib");
+    }
+
+    #[test]
+    fn a_single_entry_export_is_not_pluralized() {
+        let out = export(1, Some("/tmp/one.bib"), None);
+        assert_eq!(out.human_display(), "Wrote 1 entry to /tmp/one.bib");
+    }
+
+    #[test]
+    fn an_export_to_stdout_is_the_bibliography_itself() {
+        let out = export(1, None, Some("@book{k,\n\ttitle = {A},\n}"));
+        assert_eq!(out.human_display(), "@book{k,\n\ttitle = {A},\n}");
+    }
+
+    /// Exactly one of `path` and `content` is non-null, and both are always
+    /// serialised, so a consumer reading either gets `null` rather than a
+    /// missing key.
+    #[test]
+    fn the_export_document_keeps_its_shape_between_runs() {
+        let to_file = format_output(&export(2, Some("/tmp/x.bib"), None), true);
+        assert!(to_file.contains("\"path\": \"/tmp/x.bib\""), "{to_file}");
+        assert!(to_file.contains("\"content\": null"), "{to_file}");
+        assert!(!to_file.contains("\"dropped\""), "{to_file}");
+
+        let to_stdout = format_output(&export(2, None, Some("@book{k,\n}")), true);
+        assert!(to_stdout.contains("\"path\": null"), "{to_stdout}");
+        assert!(to_stdout.contains("\"content\": \"@book"), "{to_stdout}");
     }
 }

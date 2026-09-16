@@ -79,6 +79,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
 | `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). |
 | `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
+| `zot export <key>...` | Export items as a bibliography rendered by Zotero. `--collection <ref>` exports a whole collection instead, `--format bibtex\|ris\|csljson` picks the format, `--output PATH` writes a file, `--raw` keeps the private BibTeX fields. |
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
@@ -110,6 +111,46 @@ Note: index may be out of date -- 4 new/updated, 0 removed since last sync. Run 
 If Zotero is not reachable, the note instead says freshness could not be verified, and the search still runs against the local index.
 In `--json` mode the message is carried as a `note` field instead of printed.
 Skip the check with `--no-sync-check` (or `ZOT_NO_SYNC_CHECK=1`) for a fully offline, slightly faster search.
+
+### `export` options
+
+```bash
+zot export 6V9QI2NL VZUBFXFP                    # BibTeX on stdout
+zot export --collection "EC3-2026" --output refs.bib   # a collection to a file
+zot export --collection C39                     # by connector tree-view ID
+zot export KEY --format csljson                 # or ris
+zot search "protein folding" --export bibtex    # the search hits as a bibliography
+```
+
+Zotero renders the bibliography itself, so the output is exactly what its BibTeX, RIS and CSL JSON translators produce.
+`--collection` takes the same reference as everywhere else in the CLI, a key, an exact name, or a connector tree-view ID, and exports the collection's direct members without walking subcollections.
+
+BibTeX arrives with fields that describe your library rather than the work, and they are stripped by default:
+
+| Field | Why |
+|---|---|
+| `file` | absolute path into your Zotero storage directory |
+| `annote` | the item's child notes |
+| `abstract` | a paragraph per entry, rarely wanted in a `.bib` |
+| `keywords` | your tags, not the publisher's |
+
+`--raw` keeps all of them.
+`note` and `urldate` are left alone: Zotero puts the **Extra** field in `note`, which routinely holds the arXiv ID or a version number, and `urldate` comes from the access date, which biblatex pairs with `url` on `@online` and `@misc` entries.
+RIS and CSL JSON carry none of these, so `--raw` changes nothing there and both are always passed through as Zotero rendered them, except that CSL JSON is re-serialized (and so pretty-printed with two-space indent) because merging several pages into one array requires parsing it.
+
+Some items have no translator output at all: a standalone note or attachment, for instance.
+A rendered entry's citation key (`jumperHighlyAccurateProtein2021`) has no relation to the Zotero item key, so `zot` counts entries per request and, when a batch comes back short, re-requests its keys one at a time to find exactly which item was dropped.
+Each one is named on stderr:
+
+```
+Warning: no bibtex entry for "note: Curriculum" (VETJB3WE) -- the Zotero translator produced no entry for it.
+```
+
+Warnings always go to stderr, so stdout stays exactly the bibliography, and a `--output` file stays exactly the bibliography.
+Under `--json` stdout is one document instead: `{format, requested, exported, path, content}`.
+`path` and `content` are both always present with exactly one of them non-null, so the shape does not vary between runs: `content` holds the bibliography as a string, and `--output` sets `path` instead and leaves `content` null, since the file is then the payload.
+A `dropped` array appears alongside them only when something was dropped.
+`zot search --export` nests that same object under an `export` key alongside the search results, so one `--json` document still carries both.
 
 ### `find` options
 

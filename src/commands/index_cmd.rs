@@ -523,7 +523,7 @@ fn no_attachment(detail: &str) -> ExtractOutcome {
 /// Minimal HTML-to-text: drop tags, decode a small set of common entities, and
 /// collapse whitespace. Deliberately lightweight (no HTML crate); good enough
 /// for Zotero note bodies, which are simple formatted HTML.
-fn strip_html(html: &str) -> String {
+pub fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
     for ch in html.chars() {

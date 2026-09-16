@@ -1,22 +1,45 @@
 use anyhow::Result;
+use std::collections::HashSet;
+use std::str::FromStr;
 
 use crate::api::ZoteroClient;
+use crate::commands::export_cmd;
 use crate::index::{BgeSmallEmbedder, BgeRerankerBase, IndexStore, SearchFilters, compute_sync_diff};
 use crate::output::{format_output, SearchOutput, SearchResultOutput};
 use crate::search::hybrid_search;
 
-#[allow(clippy::too_many_arguments)]
-pub fn run_search(
-    query: &str,
-    tag: Option<&str>,
-    creator: Option<&str>,
-    item_type: Option<&str>,
-    collection: Option<&str>,
-    limit: usize,
-    rerank: bool,
-    no_sync_check: bool,
-    json: bool,
-) -> Result<()> {
+pub struct SearchArgs<'a> {
+    pub query: &'a str,
+    pub tag: Option<&'a str>,
+    pub creator: Option<&'a str>,
+    pub item_type: Option<&'a str>,
+    pub collection: Option<&'a str>,
+    pub limit: usize,
+    pub rerank: bool,
+    pub no_sync_check: bool,
+    pub export: Option<&'a str>,
+    pub json: bool,
+}
+
+pub fn run_search(args: SearchArgs) -> Result<()> {
+    let SearchArgs {
+        query,
+        tag,
+        creator,
+        item_type,
+        collection,
+        limit,
+        rerank,
+        no_sync_check,
+        export,
+        json,
+    } = args;
+
+    // Fail on a bad format name before spending a minute loading models.
+    if let Some(format) = export {
+        crate::api::ExportFormat::from_str(format)?;
+    }
+
     let store = IndexStore::open_or_create("BGESmallENV15", 384)?;
 
     if store.meta().chunk_count == 0 {
@@ -60,7 +83,7 @@ pub fn run_search(
         limit,
     )?;
 
-    let output = SearchOutput {
+    let mut output = SearchOutput {
         query: query.to_string(),
         result_count: results.len(),
         results: results
@@ -81,7 +104,21 @@ pub fn run_search(
         // Carried on the output object so it renders at the top in human mode and
         // appears as a `note` field in JSON. Omitted entirely when in sync.
         note,
+        export: None,
     };
+
+    // Keys are deduplicated because several chunks of one item can rank, and a
+    // bibliography wants one entry per item.
+    if let Some(format) = export {
+        let mut seen = HashSet::new();
+        let keys: Vec<String> = output
+            .results
+            .iter()
+            .filter(|r| seen.insert(r.key.clone()))
+            .map(|r| r.key.clone())
+            .collect();
+        output.export = Some(export_cmd::export_for_keys(&keys, format)?);
+    }
 
     println!("{}", format_output(&output, json));
     Ok(())

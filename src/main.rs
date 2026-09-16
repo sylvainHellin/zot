@@ -72,6 +72,34 @@ enum Commands {
         /// Skip the "is the index up to date?" check against Zotero (faster, offline)
         #[arg(long)]
         no_sync_check: bool,
+
+        /// Print the hits as a bibliography instead: bibtex, ris or csljson
+        #[arg(long, value_name = "FORMAT")]
+        export: Option<String>,
+    },
+
+    /// Export items as a bibliography rendered by Zotero (BibTeX, RIS, CSL JSON)
+    Export {
+        /// Zotero item key(s)
+        keys: Vec<String>,
+
+        /// Export a whole collection instead: key, exact name, or tree-view ID
+        /// like C42 (direct members only)
+        #[arg(long, value_name = "REF", conflicts_with = "keys")]
+        collection: Option<String>,
+
+        /// Output format: bibtex, ris or csljson
+        #[arg(long, default_value = "bibtex")]
+        format: String,
+
+        /// Write to this file instead of stdout (overwritten if it exists)
+        #[arg(long, value_name = "PATH")]
+        output: Option<String>,
+
+        /// Keep the private BibTeX fields (file, annote, abstract, keywords,
+        /// note, urldate) that are stripped by default
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Keyword search via Zotero REST API (live, always in sync)
@@ -336,17 +364,33 @@ fn main() {
             limit,
             rerank,
             no_sync_check,
-        } => commands::search_cmd::run_search(
-            &query,
-            tag.as_deref(),
-            creator.as_deref(),
-            item_type.as_deref(),
-            collection.as_deref(),
+            export,
+        } => commands::search_cmd::run_search(commands::search_cmd::SearchArgs {
+            query: &query,
+            tag: tag.as_deref(),
+            creator: creator.as_deref(),
+            item_type: item_type.as_deref(),
+            collection: collection.as_deref(),
             limit,
             rerank,
             no_sync_check,
+            export: export.as_deref(),
             json,
-        ),
+        }),
+        Commands::Export {
+            keys,
+            collection,
+            format,
+            output,
+            raw,
+        } => commands::export_cmd::run_export(commands::export_cmd::ExportArgs {
+            keys: &keys,
+            collection: collection.as_deref(),
+            format: &format,
+            output: output.as_deref(),
+            raw,
+            json,
+        }),
         Commands::Find {
             query,
             tag,
