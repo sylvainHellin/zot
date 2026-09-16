@@ -216,9 +216,10 @@ enum Commands {
         count: bool,
     },
 
-    /// Add a paper to the library (by DOI/arXiv identifier and/or PDF)
+    /// Add a paper to the library (by DOI/arXiv/ISBN/PMID identifier and/or PDF)
     Add {
-        /// Identifier: DOI (10.xxxx/..., doi.org URL) or arXiv ID/URL
+        /// Identifier: DOI (10.xxxx/..., doi.org URL), arXiv ID/URL,
+        /// ISBN-10/ISBN-13, or PubMed ID
         identifier: Option<String>,
 
         /// PDF file to save (with an identifier: used with Zotero's

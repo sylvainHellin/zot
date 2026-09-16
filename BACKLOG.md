@@ -1,19 +1,16 @@
 # Backlog
 
-## More `zot add` identifier types -- ISBN, PubMed, plain URL
+## `zot add` by PMCID and by plain URL
 
-`zot add` supports DOI and arXiv today. Worth adding later:
-
-- **ISBN**: no content-negotiation service; OpenLibrary
-  (`https://openlibrary.org/isbn/<isbn>.json`) or Google Books, mapped to
-  BibTeX before `/connector/import`.
-- **PubMed ID (PMID/PMCID)**: NCBI E-utilities (`efetch` with
-  `rettype=medline`) or the idconv API to get a DOI, then the existing DOI
-  path.
-- **Plain URL**: hardest -- needs Zotero's web translators. The connector's
-  `/connector/saveSnapshot` saves a webpage item without translation; real
-  translator-based saving expects the connector to run the translator
-  browser-side. A translation-server sidecar would cover this properly.
+`zot add` supports DOI, arXiv, ISBN and PMID identifiers today. A PMCID
+(`PMC3531190`) is not recognised; NCBI's `idconv` API maps PMC to PMID, which
+would be one extra request on an unambiguous prefix. The remaining form is the
+hardest: a plain URL needs Zotero's web translators. The connector's
+`/connector/saveSnapshot` saves a webpage item without translation; real
+translator-based saving expects the connector to run the translator
+browser-side. A translation-server sidecar would cover this properly, at the
+cost of a Docker runtime dependency on a tool that currently needs nothing but
+Zotero itself.
 
 Origin: 2026-07-27, write-support work; deferred per review of
 PLAN-write-support.md.

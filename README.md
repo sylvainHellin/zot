@@ -1,7 +1,7 @@
 # zot
 
 A CLI for querying and maintaining your local [Zotero](https://www.zotero.org/) library.
-It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv or PDF, edit metadata, attach files, and trash items.
+It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv/ISBN/PubMed ID or PDF, edit metadata, attach files, and trash items.
 
 `zot` talks to the Zotero local HTTP API (the desktop app's built-in server at `http://localhost:23119`), so the library never leaves the machine and no Zotero web API key is required for reading.
 For semantic search it builds a local index (embeddings plus a Tantivy full-text index) on disk.
@@ -58,7 +58,7 @@ zot search "diffusion models for point clouds"
 # 3. Live keyword search straight from Zotero (no index needed)
 zot find "kalman filter" --everything
 
-# 4. Add a paper by DOI or arXiv ID (also refreshes the index)
+# 4. Add a paper by DOI, arXiv ID, ISBN or PubMed ID (also refreshes the index)
 zot add 10.1145/361598.361623 --tag to-read
 zot add arXiv:2401.12345 --collection "Large Language Models"
 zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
@@ -80,7 +80,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). |
 | `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
 | `zot export <key>...` | Export items as a bibliography rendered by Zotero. `--collection <ref>` exports a whole collection instead, `--format bibtex\|ris\|csljson` picks the format, `--output PATH` writes a file, `--raw` keeps the private BibTeX fields. |
-| `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF, locally via Zotero's connector API. |
+| `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv/ISBN/PubMed identifier and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
 | `zot rm <key>...` | Move items to the Zotero trash (web API plus sync, restorable). |
@@ -196,6 +196,9 @@ Filing into several collections is the exception: the connector takes one collec
 ```bash
 zot add 10.1038/nature14539                 # DOI (also doi.org URLs)
 zot add arXiv:2401.12345                    # arXiv ID (also arxiv.org URLs)
+zot add 978-0-262-03561-3                   # ISBN-10 or ISBN-13 (also ISBN:...,
+                                            # hyphens and spaces optional)
+zot add 23193287                            # PubMed ID (also PMID:... / PubMed:...)
 zot add --pdf paper.pdf                     # PDF only: Zotero's recognizer
                                             # creates the metadata item
 zot add 10.1000/xyz --pdf paper.pdf         # PDF + identifier (see below)
@@ -210,8 +213,17 @@ zot add ... --no-index                      # skip the automatic index refresh
 
 Behavior worth knowing:
 
+- Identifier forms: a bare value is read as a DOI when it starts with `10.` and contains a `/`, as an arXiv ID when it looks like `2401.12345`, as an ISBN when it normalises to 10 or 13 digits **and its check digit matches**, and as a PubMed ID when it is a plain number of up to 9 digits with no leading zero.
+  The check digit is what keeps a 13-digit order number or timestamp from resolving as a book; a number that fails it is rejected rather than guessed at.
+  The `ISBN:`, `PMID:` and `PubMed:` prefixes (case-insensitive) say which one you mean and give a type-specific error when the value is malformed.
+- Where the metadata comes from: DOIs use doi.org content negotiation and arXiv IDs use arxiv.org's BibTeX export, both as before.
+  A PubMed ID makes one NCBI `efetch` call in MEDLINE form; when the record carries a DOI the publisher's BibTeX is used instead, since it is richer, and otherwise the MEDLINE record is mapped to BibTeX directly.
+  An ISBN goes to OpenLibrary (`openlibrary.org/api/books`), which answers with author names inline in a single request, and is mapped to a BibTeX `@book`.
+  There is no Google Books fallback: its keyless endpoint answers 429 for everyone sharing the anonymous project, so a second lookup would only delay the error.
 - Duplicate guard: before adding, the identifier is checked against the library (DOI, URL, extra fields).
   If it matches, the add is refused and reports the existing item's key; `--force` overrides.
+  An ISBN is checked differently, because Zotero stores it hyphenated and its quicksearch does not match across the hyphens: the books are listed and their `ISBN` fields compared digit by digit, which catches a book whether it is stored hyphenated or not and whether its field holds one ISBN or the print and electronic ones together.
+  One gap remains: a PubMed ID resolved through its DOI leaves an item carrying that DOI and no PMID, so re-adding the same PMID is not caught (re-adding its DOI is).
 - PDF recognition: with `--pdf`, the file is saved and Zotero's metadata recognizer creates the parent item, waiting until recognition finishes.
   An identifier given alongside the PDF is used only for the duplicate check and as a metadata fallback when recognition fails, so verify that the recognized metadata matches.
   If recognition fails entirely, the PDF is kept as a standalone attachment and, when an identifier was given, the metadata is imported separately; join them with `zot attach` or in the Zotero UI.
@@ -226,7 +238,7 @@ Behavior worth knowing:
   The warning is stderr only, so `--json` stdout stays a single document, where the same fact reads as `collections: null`; that key is always serialised, so a strict consumer can test it.
 - Index refresh: after a successful add, the search index updates incrementally so the paper is immediately findable via `zot search`.
 - No local delete: the connector API cannot remove items, so a mistaken add must be undone with `zot rm` (web API) or in the Zotero UI.
-- Identifiers beyond DOI and arXiv (ISBN, PubMed, plain URLs) are on the roadmap, see `BACKLOG.md`.
+- Adding by plain URL is on the roadmap, see `BACKLOG.md`; it needs Zotero's web translators, which the connector API does not expose.
 
 ## Auditing filing (`zot unfiled`)
 

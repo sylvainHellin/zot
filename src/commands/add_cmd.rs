@@ -2,7 +2,7 @@
 //! endpoints.
 //!
 //! Paths:
-//!   - identifier only: resolve DOI/arXiv -> BibTeX -> `/connector/import`.
+//!   - identifier only: resolve DOI/arXiv/ISBN/PMID -> BibTeX -> `/connector/import`.
 //!   - `--pdf` (with or without identifier): `/connector/saveStandaloneAttachment`,
 //!     then Zotero's recognizer creates the parent item. If an identifier was
 //!     given and recognition fails, fall back to importing the metadata (the
@@ -44,7 +44,7 @@ pub struct AddArgs<'a> {
 pub fn run_add(args: AddArgs) -> Result<()> {
     check_collection_flags(args.no_collection, &args.collections)?;
     if args.identifier.is_none() && args.pdf.is_none() {
-        bail!("Nothing to add: pass an identifier (DOI/arXiv) and/or --pdf <file>.");
+        bail!("Nothing to add: pass an identifier (DOI/arXiv/ISBN/PMID) and/or --pdf <file>.");
     }
 
     let local = ZoteroClient::new()?;
@@ -348,6 +348,16 @@ fn check_collection_flags(no_collection: bool, collections: &[String]) -> Result
 /// DOI hits every paper whose references mention it. Only count a hit as a
 /// duplicate when the identifier appears in an actual metadata field (DOI,
 /// URL, or extra) of a regular item.
+///
+/// An ISBN does not go through the quicksearch at all. Zotero stores an ISBN
+/// hyphenated (`9781119287537` is rewritten to `978-1-119-28753-7` on import)
+/// and the quicksearch matches substrings but not across the hyphens, so no
+/// query on the bare digits can return the book. The books are enumerated and
+/// their ISBN fields compared instead; see [`isbn_field_matches`].
+///
+/// One gap is left: a PMID resolved through its DOI produces an item carrying
+/// that DOI and no PMID, so re-adding the same PMID is not caught; adding its
+/// DOI is. That is a gap in the guard, not a reason to reach for `--force`.
 fn check_duplicates(local: &ZoteroClient, id: &Identifier) -> Result<()> {
     let params = SearchParams {
         everything: true,
@@ -355,7 +365,7 @@ fn check_duplicates(local: &ZoteroClient, id: &Identifier) -> Result<()> {
         ..Default::default()
     };
     let needle = id.dedup_query().to_lowercase();
-    let hits: Vec<_> = local
+    let mut hits: Vec<_> = local
         .search_items(id.dedup_query(), &params)?
         .into_iter()
         .filter(|i| {
@@ -373,6 +383,30 @@ fn check_duplicates(local: &ZoteroClient, id: &Identifier) -> Result<()> {
                 || extra.to_lowercase().contains(&needle)
         })
         .collect();
+
+    // The second, ISBN-only pass: an empty query listing every book, which a
+    // personal library counts in the tens, then a field comparison the
+    // quicksearch cannot do.
+    if let Identifier::Isbn(isbn) = id {
+        let books = SearchParams {
+            everything: true,
+            item_type: Some("book".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        };
+        for item in local.search_items("", &books)? {
+            let field = item
+                .data
+                .extra
+                .get("ISBN")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if isbn_field_matches(field, isbn) && !hits.iter().any(|h| h.key == item.key) {
+                hits.push(item);
+            }
+        }
+    }
+
     if !hits.is_empty() {
         let listing: Vec<String> = hits
             .iter()
@@ -385,6 +419,31 @@ fn check_duplicates(local: &ZoteroClient, id: &Identifier) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// True when a Zotero `ISBN` field names the book `needle` identifies.
+///
+/// Two things make this more than a string compare. The field is stored
+/// hyphenated, so both sides are reduced to their alphanumerics (an ISBN-10
+/// check digit may be `X`, hence alphanumerics and not digits). And the field
+/// can hold several ISBNs separated by whitespace, the print and the
+/// electronic edition, so each token is compared on its own rather than the
+/// field as a whole.
+///
+/// `needle` is compared as given: re-hyphenating it would need the ISBN range
+/// table, which is not worth carrying to answer a yes/no question.
+fn isbn_field_matches(field: &str, needle: &str) -> bool {
+    fn core(s: &str) -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_uppercase())
+            .collect()
+    }
+    let want = core(needle);
+    if want.is_empty() {
+        return false;
+    }
+    field.split_whitespace().any(|token| core(token) == want)
 }
 
 /// Every `--collection` value resolved to a write target, before anything is
@@ -646,7 +705,10 @@ fn poll_for_item(web: &WebApiClient, item_key: &str, extra: usize) -> Result<Val
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedCollections, check_collection_flags, edit_command, unfiled_warning};
+    use super::{
+        ResolvedCollections, check_collection_flags, edit_command, isbn_field_matches,
+        unfiled_warning,
+    };
     use crate::api::connector::SaveTarget;
     use crate::api::models::ZoteroCollection;
     use crate::collections::{CollectionNode, build_tree};
@@ -970,5 +1032,37 @@ mod tests {
         // Nothing to add: equal to the current membership, so no write.
         let current = v(&["ROOT1", "CHILD1"]);
         assert_eq!(merge_collections(&current, &v(&["CHILD1"]), &[]), current);
+    }
+
+    #[test]
+    fn a_hyphenated_stored_isbn_matches_the_bare_needle() {
+        // Live from the library on 2026-09-16: QZ3UQGNL stores one ISBN,
+        // SJR838XV two, and both are the same BIM Handbook.
+        assert!(isbn_field_matches("978-1-119-28753-7", "9781119287537"));
+        assert!(isbn_field_matches(
+            "978-1-119-28753-7 978-1-119-28756-8",
+            "9781119287537"
+        ));
+        // The second ISBN of that pair matches just as well.
+        assert!(isbn_field_matches(
+            "978-1-119-28753-7 978-1-119-28756-8",
+            "9781119287568"
+        ));
+        // An ISBN-10 X check digit, either case, on either side.
+        assert!(isbn_field_matches("0-439-42089-X", "043942089X"));
+        assert!(isbn_field_matches("043942089x", "043942089X"));
+        // A book with no ISBN recorded matches nothing, and neither does an
+        // empty needle against a stored value.
+        assert!(!isbn_field_matches("", "9781119287537"));
+        assert!(!isbn_field_matches("978-1-119-28753-7", ""));
+        // A different book, and a near miss in the check digit.
+        assert!(!isbn_field_matches("978-0-262-03561-3", "9781119287537"));
+        assert!(!isbn_field_matches("978-1-119-28753-7", "9781119287538"));
+        // The tokens are compared one at a time: the concatenation of a
+        // two-ISBN field is not an ISBN anyone can hold.
+        assert!(!isbn_field_matches(
+            "978-1-119-28753-7 978-1-119-28756-8",
+            "97811192875379781119287568"
+        ));
     }
 }
