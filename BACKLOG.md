@@ -48,7 +48,171 @@ Implementation notes:
   returned nothing). Detect missing keys by diffing requested vs returned and
   warn, or fall back to building a minimal entry from the item metadata.
 - Related: a `zot collections` discovery command (list/create) would round out
-  the workflow -- creating a collection still needs the Zotero UI today.
+  the workflow -- creating a collection still needs the Zotero UI today. Now
+  specified below under "zot collections".
 
 Origin: 2026-06-05, exporting a 12-item reference set for the ECPPM 2026 paper;
 had to curl the local API and post-process in Python.
+
+## Collection filing -- the API constraints that shape all of it
+
+Shared background for the four entries that follow. Established by probing a
+live Zotero 7 instance on 2026-09-16; re-probe before trusting it.
+
+- **The local API is read-only.** `PATCH
+  http://localhost:23119/api/users/0/items/<key>` returns **501**. Reads are
+  fine, writes are not. There is no local write path.
+- **The debug bridge is not available.** `GET /debug-bridge/execute?token=x`
+  returns **404** (it needs an opt-in pref). So there is no local JS escape
+  hatch for `Zotero.Sync.Runner.sync()` or direct collection mutation.
+- **The connector can only express one collection.**
+  `POST /connector/updateSession` takes a single `target` (`L1` = My Library,
+  `C<n>` = a collection, as listed by `POST /connector/getSelectedCollection`)
+  plus a comma-separated `tags` string. It *retargets* a save session, it does
+  not add membership, so multi-collection filing is impossible through it.
+- **Therefore multi-collection membership must go through the web API**:
+  `PATCH /users/<id>/items/<key>` with a complete `collections` array. The array
+  is replaced wholesale, never merged.
+- **web -> local sync is prompt, local -> web is not.** Verified: a
+  `zot edit 3ER9U8F7 --patch '{"collections":["KMHNIPDA"]}'` returned version
+  16817 and the local library reported `Last-Modified-Version: 16817` with the
+  new membership immediately. The reverse direction is the problem: an item
+  just created by `zot add` does not exist on api.zotero.org until Zotero
+  syncs up, which is the already-documented "not found on api.zotero.org"
+  error. Any post-add web patch needs a bounded poll, not a single attempt.
+
+## zot collections -- list the collection tree
+
+There is no way to discover collection keys, names, hierarchy, or item counts
+from the CLI. Every filing or export task starts with a hand-written curl
+against `/api/users/0/collections` plus a Python script to rebuild the tree,
+which is undiscoverable for an agent reading the skill and is the root cause of
+items landing unfiled: you cannot pass `--collection` to a collection whose
+name you have no way to look up.
+
+Proposed shape:
+
+```
+zot collections                          # full tree, indented, with counts
+zot collections --flat                   # one line per collection, no indent
+zot collections --tree-ids               # show connector IDs (C42) alongside keys
+zot collections KEY                      # one subtree
+zot collections --create NAME [--parent KEY]   # later; needs the web API
+```
+
+Human output should carry, per line: indent by depth, name, direct item count,
+recursive item count, and the key. That is exactly what a filing decision
+needs. `--json` should emit `{key, name, parent, depth, count_direct,
+count_tree}`.
+
+Implementation notes:
+- `ZoteroClient::fetch_collections()` (`src/api/client.rs:267`) already
+  paginates the whole list and returns `ZoteroCollection`, whose `data` carries
+  `name` and `parentCollection`. Building the tree is pure local work.
+- Item counts are the only extra cost. `/collections/<key>/items/top` returns
+  **direct members only** and gives no recursive count, so one request per
+  collection is both slow and insufficient. Cheaper and correct: fetch all
+  top-level items once (`/items/top`, paginated, ~463 items today), read each
+  item's `data.collections` array, tally direct counts, then roll up the tree
+  in memory.
+- `--create` needs `POST /users/<id>/collections` on the web API, so it belongs
+  with the other `WebApiClient` writes in `src/api/webapi.rs` and inherits the
+  same sync caveat. Splitting it into a later pass is fine; listing is the part
+  that unblocks everything else.
+
+Origin: 2026-09-16, auditing why new items were landing in Zotero's unfiled
+items (12 found). Diagnosing it required curl plus a Python tree-builder.
+
+## Collection filing on add and edit
+
+Filing is currently easy to get wrong in three separate ways. Sylvain's rule is
+that every added item belongs in at least one `2 Library` topic collection,
+plus a `1 References` paper collection when it is being cited by a specific
+manuscript. The CLI cannot express that in one command.
+
+### 1. `zot add --collection` should be repeatable
+
+Today it is `Option<&str>` (`AddArgs.collection`, `src/commands/add_cmd.rs:25`),
+so two-collection filing takes two commands across two APIs:
+
+```bash
+zot add 10.xxxx/yyy --collection KMHNIPDA
+zot edit KEY --patch '{"collections":["KMHNIPDA","ZSL8LTE2"]}'
+```
+
+Proposed: `--collection` repeatable, like `--tag` already is.
+
+```
+zot add 10.xxxx/yyy --collection KMHNIPDA --collection ZSL8LTE2
+```
+
+Implementation notes:
+- `resolve_target()` (`src/commands/add_cmd.rs:242`) already accepts a key, an
+  exact name, or a raw tree ID (`C42`) and errors helpfully on ambiguity.
+  Extend it to a `Vec`, resolving each independently so a typo in the second
+  collection fails before anything is written.
+- Use the first resolved collection as the connector `target` (that path is
+  unchanged and needs no key), then patch the full array via the web API for
+  the rest. Per the constraints section, that patch needs a bounded poll for
+  the item to appear upstream: retry `get_item` every ~2s up to ~60s, then warn
+  with the exact `zot edit --add-collection` command to run by hand rather than
+  failing silently.
+- The item is already filed in collection one at that point, so a failed poll
+  degrades to "partially filed", never to unfiled. Say so in the warning.
+
+### 2. `zot edit` needs `--add-collection` / `--rm-collection`
+
+Changing membership today means hand-writing the whole array through `--patch`,
+which replaces rather than merges. Forgetting an existing key silently unfiles
+the item from that collection, with no warning and no diff.
+
+```
+zot edit KEY --add-collection ZSL8LTE2
+zot edit KEY --rm-collection JKC52HRT
+```
+
+Implementation notes:
+- Mirror the existing tag logic exactly: `run_edit` (`src/commands/edit_cmd.rs`)
+  already fetches the item via `web.get_item(key)` when `--add-tag`/`--rm-tag`
+  is present, merges, and writes back the full array. `collections` is the same
+  shape but simpler, a plain array of key strings rather than `{tag: ...}`
+  objects.
+- Accept names and tree IDs here too, not just keys, once `zot collections`
+  exists to resolve them.
+- Report the before/after membership in the `EditOutput.changed` detail so a
+  mistake is visible in the command output.
+
+### 3. `zot add` should not silently default to the library root
+
+With no `--collection`, `resolve_target` returns the library root and the item
+becomes an unfiled item. Nothing in the output says so, which is how 12 items
+accumulated there unnoticed.
+
+Proposed: warn on stderr by default ("no --collection given; <title> is now an
+unfiled item"), and add `--no-collection` as the explicit opt-out for the rare
+standalone add. A hard error is the alternative, but it would break the
+legitimate "add now, file in the Zotero UI later" flow.
+
+Origin: 2026-09-16, same audit. The two-API dance and the silent root default
+were both found while checking whether the skill's filing rule was enforceable.
+
+## zot unfiled -- list items in no collection
+
+No way to audit filing drift. Finding the 12 unfiled items required fetching
+all 463 top-level items and filtering on an empty `data.collections` in Python.
+
+```
+zot unfiled                  # key, type, title for every unfiled top-level item
+zot unfiled --count          # just the number, for a scripted health check
+```
+
+Implementation notes:
+- Pure local read, no key needed, no index needed: page `/items/top` and keep
+  items whose `data.collections` is empty. The same item fetch that
+  `zot collections` needs for its counts, so the two share a helper.
+- Filter attachments and notes out by default. The audit turned up a stray
+  top-level `attachment` item (`SLJFJADB`, "norms") among real papers, which is
+  a different kind of problem and deserves its own line in the output rather
+  than being mixed in with unfiled papers.
+
+Origin: 2026-09-16, same audit.
