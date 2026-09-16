@@ -217,6 +217,16 @@ enum Commands {
         #[arg(long = "rm-tag")]
         rm_tags: Vec<String>,
 
+        /// File the item in a collection: key, exact name, or tree-view ID
+        /// (repeatable)
+        #[arg(long = "add-collection")]
+        add_collections: Vec<String>,
+
+        /// Remove the item from a collection: key, exact name, or tree-view ID
+        /// (repeatable)
+        #[arg(long = "rm-collection")]
+        rm_collections: Vec<String>,
+
         /// Raw JSON object merged into the item data (for complex fields,
         /// e.g. '{"creators":[...]}')
         #[arg(long)]
@@ -378,8 +388,19 @@ fn main() {
             sets,
             add_tags,
             rm_tags,
+            add_collections,
+            rm_collections,
             patch,
-        } => commands::edit_cmd::run_edit(&key, &sets, &add_tags, &rm_tags, patch.as_deref(), json),
+        } => commands::edit_cmd::run_edit(commands::edit_cmd::EditArgs {
+            key: &key,
+            sets: &sets,
+            add_tags: &add_tags,
+            rm_tags: &rm_tags,
+            add_collections: &add_collections,
+            rm_collections: &rm_collections,
+            patch: patch.as_deref(),
+            json,
+        }),
         Commands::Attach { key, file, title } => {
             commands::attach_cmd::run_attach(&key, &file, title.as_deref(), json)
         }

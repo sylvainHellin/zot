@@ -81,54 +81,34 @@ live Zotero 7 instance on 2026-09-16; re-probe before trusting it.
   syncs up, which is the already-documented "not found on api.zotero.org"
   error. Any post-add web patch needs a bounded poll, not a single attempt.
 
-## zot collections -- list the collection tree
+## zot collections --create -- create a collection
 
-There is no way to discover collection keys, names, hierarchy, or item counts
-from the CLI. Every filing or export task starts with a hand-written curl
-against `/api/users/0/collections` plus a Python script to rebuild the tree,
-which is undiscoverable for an agent reading the skill and is the root cause of
-items landing unfiled: you cannot pass `--collection` to a collection whose
-name you have no way to look up.
-
-Proposed shape:
+`zot collections` reads the tree but cannot add to it, so a filing script that
+wants a collection which does not exist yet has to stop and hand the job to the
+Zotero UI.
 
 ```
-zot collections                          # full tree, indented, with counts
-zot collections --flat                   # one line per collection, no indent
-zot collections --tree-ids               # show connector IDs (C42) alongside keys
-zot collections KEY                      # one subtree
-zot collections --create NAME [--parent KEY]   # later; needs the web API
+zot collections --create NAME [--parent KEY]
 ```
-
-Human output should carry, per line: indent by depth, name, direct item count,
-recursive item count, and the key. That is exactly what a filing decision
-needs. `--json` should emit `{key, name, parent, depth, count_direct,
-count_tree}`.
 
 Implementation notes:
-- `ZoteroClient::fetch_collections()` (`src/api/client.rs:267`) already
-  paginates the whole list and returns `ZoteroCollection`, whose `data` carries
-  `name` and `parentCollection`. Building the tree is pure local work.
-- Direct item counts come free: each entry in `/collections` carries
-  `meta.numItems` and `meta.numCollections` (verified 2026-09-16), so no
-  per-collection request is needed. `/collections/<key>/items/top` returns
-  **direct members only** and gives no recursive count either way.
-- Recursive counts must count *distinct* items, not the sum of direct counts:
-  143 of 465 top-level items belong to more than one collection today, so
-  summing up the tree double-counts visibly. Fetch all top-level items once
-  (`/items/top`, paginated, 465 items today), read each item's
-  `data.collections` array, and roll the tree up over a distinct-item set.
-- `--create` needs `POST /users/<id>/collections` on the web API, so it belongs
-  with the other `WebApiClient` writes in `src/api/webapi.rs` and inherits the
-  same sync caveat. Splitting it into a later pass is fine; listing is the part
-  that unblocks everything else.
+- `POST /users/<id>/collections` on the web API, so it belongs with the other
+  `WebApiClient` writes in `src/api/webapi.rs` and inherits the same sync
+  caveat: the new collection reaches the local library and the connector only
+  on the next Zotero sync.
+- `--parent` should accept anything `resolve_collection_ref`
+  (`src/collections.rs`) already takes: a key, an exact name, or a connector
+  tree-view ID. No `--parent` means top level.
+- Refuse a name that already exists under the same parent. Zotero allows the
+  duplicate, and every later `zot collections NAME` or `--add-collection NAME`
+  against it becomes ambiguous.
 
 Origin: 2026-09-16, auditing why new items were landing in Zotero's unfiled
-items (12 found). Diagnosing it required curl plus a Python tree-builder.
+items (12 found).
 
 ## Collection filing on add and edit
 
-Filing is currently easy to get wrong in three separate ways. Sylvain's rule is
+Filing is currently easy to get wrong in two separate ways. Sylvain's rule is
 that every added item belongs in at least one `2 Library` topic collection,
 plus a `1 References` paper collection when it is being cited by a specific
 manuscript. The CLI cannot express that in one command.
@@ -163,29 +143,7 @@ Implementation notes:
 - The item is already filed in collection one at that point, so a failed poll
   degrades to "partially filed", never to unfiled. Say so in the warning.
 
-### 2. `zot edit` needs `--add-collection` / `--rm-collection`
-
-Changing membership today means hand-writing the whole array through `--patch`,
-which replaces rather than merges. Forgetting an existing key silently unfiles
-the item from that collection, with no warning and no diff.
-
-```
-zot edit KEY --add-collection ZSL8LTE2
-zot edit KEY --rm-collection JKC52HRT
-```
-
-Implementation notes:
-- Mirror the existing tag logic exactly: `run_edit` (`src/commands/edit_cmd.rs`)
-  already fetches the item via `web.get_item(key)` when `--add-tag`/`--rm-tag`
-  is present, merges, and writes back the full array. `collections` is the same
-  shape but simpler, a plain array of key strings rather than `{tag: ...}`
-  objects.
-- Accept names and tree IDs here too, not just keys, once `zot collections`
-  exists to resolve them.
-- Report the before/after membership in the `EditOutput.changed` detail so a
-  mistake is visible in the command output.
-
-### 3. `zot add` should not silently default to the library root
+### 2. `zot add` should not silently default to the library root
 
 With no `--collection`, `resolve_target` returns the library root and the item
 becomes an unfiled item. Nothing in the output says so, which is how 12 items

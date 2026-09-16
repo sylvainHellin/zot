@@ -437,6 +437,14 @@ pub struct EditOutput {
 
 impl HumanDisplay for EditOutput {
     fn human_display(&self) -> String {
+        // No changed field means nothing was written: say that instead of
+        // announcing an update with an empty change list.
+        if self.changed.is_empty() {
+            return format!(
+                "No change [{}] (version {})\n  {}",
+                self.key, self.version, self.note,
+            );
+        }
         format!(
             "Updated [{}] (new version {})\n  Changed: {}\n  {}",
             self.key,

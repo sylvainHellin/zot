@@ -79,7 +79,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
 | `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. |
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF, locally via Zotero's connector API. |
-| `zot edit <key>` | Update item metadata (web API plus sync). |
+| `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
 | `zot rm <key>...` | Move items to the Zotero trash (web API plus sync, restorable). |
 | `zot config` | One-time setup of the Zotero web API key for the write commands. |
@@ -190,6 +190,7 @@ The `ZOTERO_API_KEY` env var overrides the stored key when set.
 ```bash
 zot edit A1B2C3D4 --set date=2024 --set "publicationTitle=Nature"
 zot edit A1B2C3D4 --add-tag reviewed --rm-tag to-read
+zot edit A1B2C3D4 --add-collection ABCD1234 --rm-collection "To Read"
 zot edit A1B2C3D4 --patch '{"creators":[{"creatorType":"author","firstName":"Ada","lastName":"Lovelace"}]}'
 zot attach A1B2C3D4 paper.pdf --title "Preprint PDF"
 zot rm A1B2C3D4 E5F6G7H8         # moves to trash (restorable in the UI)
@@ -197,6 +198,13 @@ zot rm A1B2C3D4 E5F6G7H8         # moves to trash (restorable in the UI)
 
 `--set` uses Zotero field names (`title`, `date`, `DOI`, `abstractNote`, `publicationTitle`, and so on), and unknown fields are rejected by the API.
 Edits use optimistic concurrency: they are version-checked and retried once on conflict.
+
+`--add-collection` and `--rm-collection` are repeatable and take anything `zot collections` accepts: a collection key, an exact name, or a connector tree-view ID.
+Every value is resolved before anything is written, so a typo fails without a partial change, and the library root (`L1`) is rejected since "no collection" is not a collection.
+The output reports membership before and after (`collections: [Inbox (ABCD1234)] -> [Inbox (ABCD1234), Read (EFGH5678)]`).
+A request that changes nothing, adding a collection the item is already in, writes nothing and still exits 0, reporting `No change` with the item's unchanged version.
+A filing loop can therefore re-run over items it has already filed without special-casing them.
+
 `zot rm` never deletes permanently, items go to the Zotero trash.
 
 An item created locally moments ago, for example via `zot add`, must sync up before `edit`, `attach`, or `rm` can see it.
