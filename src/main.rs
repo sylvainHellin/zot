@@ -156,11 +156,21 @@ enum Commands {
         contains: Option<String>,
     },
 
-    /// List the collection tree with item counts
+    /// List the collection tree with item counts, or create a collection
     Collections {
         /// Show only this collection's subtree (key, exact name, or tree-view
         /// ID like C42)
+        #[arg(conflicts_with = "create")]
         collection: Option<String>,
+
+        /// Create a collection with this name (web API plus sync)
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["flat", "tree_ids"])]
+        create: Option<String>,
+
+        /// Parent for --create (key, exact name, or tree-view ID like C42);
+        /// omit to create at the top level
+        #[arg(long, value_name = "REF", requires = "create")]
+        parent: Option<String>,
 
         /// One line per collection, without the tree indentation
         #[arg(long)]
@@ -375,11 +385,18 @@ fn main() {
         }
         Commands::Collections {
             collection,
+            create,
+            parent,
             flat,
             tree_ids,
-        } => {
-            commands::collections_cmd::run_collections(collection.as_deref(), flat, tree_ids, json)
-        }
+        } => commands::collections_cmd::run_collections(
+            collection.as_deref(),
+            create.as_deref(),
+            parent.as_deref(),
+            flat,
+            tree_ids,
+            json,
+        ),
         Commands::Unfiled { count } => commands::unfiled_cmd::run_unfiled(count, json),
         Commands::Add {
             identifier,

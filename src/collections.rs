@@ -340,14 +340,51 @@ pub fn resolve_collection_ref(
     }
 }
 
+/// The child of `parent` already carrying `name`, if there is one.
+///
+/// `parent` is a collection key, or `None` for the top level. The comparison
+/// is exact, matching how [`resolve_collection_ref`] looks names up: two
+/// siblings differing only by case stay individually addressable, two with the
+/// same name do not.
+pub fn sibling_named<'a>(
+    nodes: &'a [CollectionNode],
+    parent: Option<&str>,
+    name: &str,
+) -> Option<&'a CollectionNode> {
+    siblings(nodes, parent).find(|n| n.name == name)
+}
+
+/// The child of `parent` whose name differs from `name` only by case.
+///
+/// Not a duplicate (see [`sibling_named`]), but worth warning about: Zotero
+/// sorts siblings case-insensitively, so the two land next to each other and
+/// read as one collection entered twice.
+pub fn sibling_named_ignoring_case<'a>(
+    nodes: &'a [CollectionNode],
+    parent: Option<&str>,
+    name: &str,
+) -> Option<&'a CollectionNode> {
+    let folded = name.to_lowercase();
+    siblings(nodes, parent).find(|n| n.name != name && n.name.to_lowercase() == folded)
+}
+
+fn siblings<'a>(
+    nodes: &'a [CollectionNode],
+    parent: Option<&str>,
+) -> impl Iterator<Item = &'a CollectionNode> {
+    let parent = parent.map(str::to_string);
+    nodes.iter().filter(move |n| n.parent == parent)
+}
+
 /// Map collection keys to connector tree-view IDs by full name path.
 ///
 /// The connector reports a flat, preorder list where `level` is the depth
 /// (0 = a library root), so the ancestry of each target is recoverable from a
 /// stack. Only targets under [`LIBRARY_ROOT_ID`] are considered, since the read
-/// API's collections all come from that library. A path shared by two
-/// collections (impossible in Zotero, which forbids duplicate sibling names)
-/// maps to neither.
+/// API's collections all come from that library. Zotero does accept two
+/// siblings with the same name, and the pairing degrades when it happens: a
+/// path shared by two collections maps to neither, so both keep their keys but
+/// lose their tree-view IDs rather than one of them borrowing the other's.
 fn pair_connector_ids(nodes: &[CollectionNode], targets: &[SaveTarget]) -> HashMap<String, String> {
     let mut path_to_id: HashMap<String, Option<&str>> = HashMap::new();
     let mut ancestors: Vec<&str> = Vec::new();
@@ -688,6 +725,48 @@ mod tests {
         );
         assert_eq!(nodes[0].tree_id.as_deref(), Some("C1"));
         assert_eq!(nodes[1].tree_id, None);
+    }
+
+    #[test]
+    fn sibling_named_finds_a_duplicate_only_under_the_same_parent() {
+        let (nodes, _) = resolvable();
+        // "Shared" exists under both ROOT1 and ROOT2.
+        assert_eq!(
+            sibling_named(&nodes, Some("ROOT1"), "Shared").map(|n| n.key.as_str()),
+            Some("CHILD1")
+        );
+        assert_eq!(
+            sibling_named(&nodes, Some("ROOT2"), "Shared").map(|n| n.key.as_str()),
+            Some("CHILD2")
+        );
+        // A third parent may hold its own "Shared", and the top level too.
+        assert!(sibling_named(&nodes, Some("ROOT3"), "Shared").is_none());
+        assert!(sibling_named(&nodes, None, "Shared").is_none());
+    }
+
+    #[test]
+    fn sibling_named_finds_a_top_level_duplicate() {
+        let (nodes, _) = resolvable();
+        assert_eq!(
+            sibling_named(&nodes, None, "Alpha").map(|n| n.key.as_str()),
+            Some("ROOT1")
+        );
+        // A name that only exists one level down is not a top-level duplicate.
+        assert!(sibling_named(&nodes, None, "Shared").is_none());
+    }
+
+    #[test]
+    fn sibling_named_is_case_sensitive_and_the_fold_is_reported_separately() {
+        let (nodes, _) = resolvable();
+        assert!(sibling_named(&nodes, None, "alpha").is_none());
+        assert_eq!(
+            sibling_named_ignoring_case(&nodes, None, "alpha").map(|n| n.key.as_str()),
+            Some("ROOT1")
+        );
+        // An exact match is not also a case-fold match.
+        assert!(sibling_named_ignoring_case(&nodes, None, "Alpha").is_none());
+        assert!(sibling_named_ignoring_case(&nodes, Some("ROOT1"), "shared").is_some());
+        assert!(sibling_named_ignoring_case(&nodes, Some("ROOT3"), "shared").is_none());
     }
 
     #[test]

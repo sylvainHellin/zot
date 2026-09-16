@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, bail};
 use md5::{Digest, Md5};
 use reqwest::blocking::Client;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::config::Config;
 
@@ -107,6 +107,10 @@ impl WebApiClient {
 
     fn items_url(&self, suffix: &str) -> String {
         format!("{WEB_API_BASE}/users/{}/items{}", self.user_id, suffix)
+    }
+
+    fn collections_url(&self) -> String {
+        format!("{WEB_API_BASE}/users/{}/collections", self.user_id)
     }
 
     fn auth(&self, req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
@@ -210,6 +214,38 @@ impl WebApiClient {
         Ok(v)
     }
 
+    /// Create one collection (POST). Returns its new key.
+    ///
+    /// `parent` is the key of the parent collection, or `None` for a top-level
+    /// one. The body is an array because Zotero's write endpoints only take
+    /// batches, even of one.
+    pub fn create_collection(&self, name: &str, parent: Option<&str>) -> Result<String> {
+        let body = json!([{
+            "name": name,
+            "parentCollection": match parent {
+                Some(key) => json!(key),
+                None => json!(false),
+            },
+        }]);
+        let resp = self
+            .auth(self.client.post(self.collections_url()))
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .context("Failed to POST collection")?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            bail!(
+                "Web API collection creation failed (status {status}): {}",
+                text.trim()
+            );
+        }
+        let v: Value =
+            serde_json::from_str(&text).context("Failed to parse collection creation response")?;
+        created_collection_key(&v)
+    }
+
     /// Upload a file for an existing attachment item (Zotero 3-step flow:
     /// authorize -> upload -> register).
     pub fn upload_attachment_file(&self, attachment_key: &str, path: &std::path::Path) -> Result<()> {
@@ -303,6 +339,106 @@ impl WebApiClient {
     }
 }
 
+/// Pull the created collection's key out of a Zotero write response.
+///
+/// Zotero answers a write with 200 and a per-index verdict, so a rejected
+/// object arrives looking like a success and has to be turned back into an
+/// error here. Only one collection is ever sent, hence index `0`.
+fn created_collection_key(resp: &Value) -> Result<String> {
+    if let Some((index, failure)) = resp
+        .get("failed")
+        .and_then(|f| f.as_object())
+        .and_then(|f| f.iter().next())
+    {
+        let message = failure
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("no message given");
+        match failure.get("code").and_then(|c| c.as_u64()) {
+            Some(code) => bail!("Zotero rejected the collection (code {code}): {message}"),
+            None => bail!("Zotero rejected the collection (index {index}): {message}"),
+        }
+    }
+    // `successful` carries the whole object, `success` only the key; either
+    // alone is enough to name what was created.
+    resp.pointer("/successful/0/key")
+        .or_else(|| resp.pointer("/success/0"))
+        .and_then(|k| k.as_str())
+        .map(str::to_string)
+        .with_context(|| {
+            format!(
+                "Zotero reported neither a created collection nor a failure: {}",
+                crate::output::truncate_display(&resp.to_string(), 300)
+            )
+        })
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::created_collection_key;
+    use serde_json::json;
+
+    /// Captured from `POST /users/<id>/collections` on api.zotero.org,
+    /// 2026-09-16, trimmed of `library` and `links`.
+    #[test]
+    fn created_collection_key_reads_a_successful_write() {
+        let resp = json!({
+            "successful": {
+                "0": {
+                    "key": "XMJ5WEXR",
+                    "version": 16842,
+                    "meta": { "numCollections": 0, "numItems": 0 },
+                    "data": {
+                        "key": "XMJ5WEXR",
+                        "version": 16842,
+                        "name": "zot-test-root",
+                        "parentCollection": false,
+                        "relations": {},
+                    },
+                },
+            },
+            "success": { "0": "XMJ5WEXR" },
+            "unchanged": {},
+            "failed": {},
+        });
+        assert_eq!(created_collection_key(&resp).unwrap(), "XMJ5WEXR");
+    }
+
+    /// Same endpoint, same day, sending `parentCollection: "ZZZZZZZZ"`. The
+    /// status was 200: only the body says it failed.
+    #[test]
+    fn created_collection_key_turns_a_failed_entry_into_an_error() {
+        let resp = json!({
+            "successful": {},
+            "success": {},
+            "unchanged": {},
+            "failed": {
+                "0": {
+                    "code": 409,
+                    "message": "Parent collection ZZZZZZZZ not found",
+                    "data": { "collection": "ZZZZZZZZ" },
+                },
+            },
+        });
+        let err = created_collection_key(&resp).unwrap_err().to_string();
+        assert!(err.contains("409"), "{err}");
+        assert!(err.contains("Parent collection ZZZZZZZZ not found"), "{err}");
+    }
+
+    #[test]
+    fn created_collection_key_falls_back_to_the_success_map() {
+        let resp = json!({ "success": { "0": "ABCD1234" }, "failed": {} });
+        assert_eq!(created_collection_key(&resp).unwrap(), "ABCD1234");
+    }
+
+    #[test]
+    fn created_collection_key_rejects_a_body_reporting_nothing() {
+        let resp = json!({ "successful": {}, "success": {}, "failed": {} });
+        let err = created_collection_key(&resp).unwrap_err().to_string();
+        assert!(err.contains("neither a created collection nor a failure"), "{err}");
+    }
 }

@@ -47,16 +47,13 @@ Implementation notes:
 - The translator silently drops some items (observed: an arXiv `conferencePaper`
   returned nothing). Detect missing keys by diffing requested vs returned and
   warn, or fall back to building a minimal entry from the item metadata.
-- Related: a `zot collections` discovery command (list/create) would round out
-  the workflow -- creating a collection still needs the Zotero UI today. Now
-  specified below under "zot collections".
 
 Origin: 2026-06-05, exporting a 12-item reference set for the ECPPM 2026 paper;
 had to curl the local API and post-process in Python.
 
 ## Collection filing -- the API constraints that shape all of it
 
-Background for the collection entries that follow. Established by probing a
+Background for any further collection or write work. Established by probing a
 live Zotero 7 instance on 2026-09-16; re-probe before trusting it.
 
 - **The local API is read-only.** `PATCH
@@ -80,31 +77,6 @@ live Zotero 7 instance on 2026-09-16; re-probe before trusting it.
   just created by `zot add` does not exist on api.zotero.org until Zotero
   syncs up, which is the already-documented "not found on api.zotero.org"
   error. Any post-add web patch needs a bounded poll, not a single attempt.
-
-## zot collections --create -- create a collection
-
-`zot collections` reads the tree but cannot add to it, so a filing script that
-wants a collection which does not exist yet has to stop and hand the job to the
-Zotero UI.
-
-```
-zot collections --create NAME [--parent KEY]
-```
-
-Implementation notes:
-- `POST /users/<id>/collections` on the web API, so it belongs with the other
-  `WebApiClient` writes in `src/api/webapi.rs` and inherits the same sync
-  caveat: the new collection reaches the local library and the connector only
-  on the next Zotero sync.
-- `--parent` should accept anything `resolve_collection_ref`
-  (`src/collections.rs`) already takes: a key, an exact name, or a connector
-  tree-view ID. No `--parent` means top level.
-- Refuse a name that already exists under the same parent. Zotero allows the
-  duplicate, and every later `zot collections NAME` or `--add-collection NAME`
-  against it becomes ambiguous.
-
-Origin: 2026-09-16, auditing why new items were landing in Zotero's unfiled
-items (12 found).
 
 ## zot tags -- vocabulary enforcement and bulk cleanup
 

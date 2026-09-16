@@ -313,6 +313,42 @@ impl HumanDisplay for CollectionsOutput {
     }
 }
 
+/// One collection created by `zot collections --create`.
+#[derive(Debug, Serialize)]
+pub struct CollectionCreatedOutput {
+    pub key: String,
+    pub name: String,
+    /// Key of the parent collection; `null` for a top-level collection.
+    pub parent: Option<String>,
+    /// Name of the parent collection; `null` for a top-level collection.
+    pub parent_name: Option<String>,
+    /// Whether the collection has reached the local library yet. The write goes
+    /// to api.zotero.org, so `zot collections` only shows it once Zotero has
+    /// synced it down; `false` means "created, not visible locally yet".
+    pub synced_local: bool,
+}
+
+impl HumanDisplay for CollectionCreatedOutput {
+    fn human_display(&self) -> String {
+        let parent = match (&self.parent_name, &self.parent) {
+            (Some(name), Some(key)) => format!("{name} [{key}]"),
+            _ => "none (top level)".to_string(),
+        };
+        let local = if self.synced_local {
+            "synced down, `zot collections` shows it now"
+        } else {
+            // Spelled out because "not synced down yet" reads as a failure, and
+            // a re-run would create a real second collection: the duplicate
+            // check reads the local library, which does not have this one yet.
+            "not synced down yet; it exists upstream, so re-running --create would duplicate it"
+        };
+        format!(
+            "Created collection: {} [{}]\n  Parent: {parent}\n  Local:  {local}\n",
+            self.name, self.key,
+        )
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct UnfiledOutput {
     /// Top-level items in no collection that can be filed as they are.
@@ -650,7 +686,46 @@ impl HumanDisplay for IndexIssuesOutput {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_display;
+    use super::{CollectionCreatedOutput, HumanDisplay, format_output, truncate_display};
+
+    fn created(parent: Option<(&str, &str)>, synced_local: bool) -> CollectionCreatedOutput {
+        CollectionCreatedOutput {
+            key: "NEWKEY12".to_string(),
+            name: "Papers".to_string(),
+            parent: parent.map(|(key, _)| key.to_string()),
+            parent_name: parent.map(|(_, name)| name.to_string()),
+            synced_local,
+        }
+    }
+
+    #[test]
+    fn created_collection_names_its_parent_or_the_top_level() {
+        let child = created(Some(("ROOT1234", "Reading")), true).human_display();
+        assert!(child.contains("Created collection: Papers [NEWKEY12]"), "{child}");
+        assert!(child.contains("Parent: Reading [ROOT1234]"), "{child}");
+        assert!(child.contains("shows it now"), "{child}");
+
+        let root = created(None, false).human_display();
+        assert!(root.contains("Parent: none (top level)"), "{root}");
+        // The sync state is never left implied: the collection exists upstream
+        // either way, and only this line says whether it is visible locally.
+        assert!(root.contains("not synced down yet"), "{root}");
+        // And it says so without reading as failure, which would invite a
+        // re-run that the local-library duplicate check cannot catch yet.
+        assert!(root.contains("re-running --create would duplicate it"), "{root}");
+    }
+
+    #[test]
+    fn created_collection_json_is_one_document_with_a_null_parent_at_the_top_level() {
+        let out = format_output(&created(None, true), true);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("one JSON document");
+        assert_eq!(v["key"], "NEWKEY12");
+        assert_eq!(v["name"], "Papers");
+        assert!(v["parent"].is_null());
+        assert!(v["parent_name"].is_null());
+        assert_eq!(v["synced_local"], true);
+    }
+
 
     #[test]
     fn short_string_is_unchanged() {

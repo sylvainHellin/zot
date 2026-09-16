@@ -77,7 +77,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
 | `zot tags` | List tags in the library; `--contains` filters. |
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
-| `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. |
+| `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). |
 | `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
@@ -238,6 +238,31 @@ A filing loop can therefore re-run over items it has already filed without speci
 
 An item created locally moments ago, for example via `zot add`, must sync up before `edit`, `attach`, or `rm` can see it.
 If you get "not found on api.zotero.org", sync Zotero and retry.
+
+## Creating collections (`zot collections --create`)
+
+```bash
+zot collections --create "Reading list"                    # at the top level
+zot collections --create "2026" --parent ABCD1234          # under a collection, by key
+zot collections --create "2026" --parent "Reading list"    # parent by exact name
+zot collections --create "2026" --parent C42               # parent by connector tree-view ID
+```
+
+`--parent` takes anything the rest of the tool takes: a collection key, an exact name, or a tree-view ID.
+Omit it to create at the top level; the library root `L1` names the same place but only resolves while Zotero is running, since tree-view IDs come from the connector.
+The parent is resolved before the write, so an unknown one fails without creating anything.
+`--parent` is only meaningful with `--create` and is rejected without it, as is the listing positional together with `--create`.
+This is a web API write and needs the same key as `zot edit`.
+
+A name a sibling under the same parent already carries is refused, naming the existing key.
+Zotero itself accepts the duplicate (verified against api.zotero.org), and every later `zot collections NAME` or `--add-collection NAME` would then be ambiguous.
+The comparison is exact, so two siblings differing only by case stay individually addressable; creating one prints a warning on stderr.
+The check reads the local library while the write goes upstream, so a sibling created seconds ago and not yet synced down is invisible to it and the duplicate goes through.
+
+The new collection reaches the local library on the next sync.
+The command waits up to 20 seconds for it and reports whether it arrived (`synced_local` under `--json`); a collection that has not arrived yet exists upstream regardless and appears in `zot collections` once Zotero syncs, so re-running `--create` would make a second one rather than retry the first.
+
+The output is the created collection alone, so `--create` cannot be combined with the listing flags `--flat` and `--tree-ids`.
 
 ## Where data lives
 
