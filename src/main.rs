@@ -8,7 +8,11 @@ mod search;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "zot", about = "CLI for querying Zotero libraries with hybrid semantic search")]
+#[command(
+    name = "zot",
+    version,
+    about = "CLI for querying Zotero libraries with hybrid semantic search"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
