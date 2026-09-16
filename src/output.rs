@@ -406,6 +406,78 @@ impl HumanDisplay for CollectionCreatedOutput {
     }
 }
 
+/// One collection tree removed by `zot collections --rm`.
+#[derive(Debug, Serialize)]
+pub struct CollectionDeletedOutput {
+    pub key: String,
+    pub name: String,
+    /// Key of the parent the deleted collection hung from; `null` when it was
+    /// top level.
+    pub parent: Option<String>,
+    /// Every collection the delete removed, the named one first, then its
+    /// descendants in preorder. One DELETE removes all of them: the server
+    /// cascades.
+    pub removed: Vec<CollectionRemovedOutput>,
+    /// Descendant collections that went with it, i.e. `removed.len() - 1`.
+    pub descendant_count: usize,
+    /// Distinct top-level items that were filed somewhere in the removed tree.
+    /// None of them was deleted.
+    pub item_count: usize,
+    /// Of those, the ones now in no collection at all, because every
+    /// collection they were filed in is gone.
+    pub unfiled_count: usize,
+    /// Whether the deletion has reached the local library yet. The write goes
+    /// to api.zotero.org, so `zot collections` keeps showing the tree until
+    /// Zotero syncs it down; `false` means "deleted upstream, still listed
+    /// locally".
+    pub synced_local: bool,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionRemovedOutput {
+    pub key: String,
+    pub name: String,
+    /// Relative to the deleted collection, which is 0.
+    pub depth: usize,
+}
+
+impl HumanDisplay for CollectionDeletedOutput {
+    fn human_display(&self) -> String {
+        let mut out = format!("Deleted collection: {} [{}]\n", self.name, self.key);
+        out.push_str(&format!(
+            "  Removed: {} collection{} ({} descendant{})\n",
+            self.removed.len(),
+            if self.removed.len() == 1 { "" } else { "s" },
+            self.descendant_count,
+            if self.descendant_count == 1 { "" } else { "s" },
+        ));
+        for c in &self.removed {
+            out.push_str(&format!(
+                "    {:indent$}{} [{}]\n",
+                "",
+                c.name,
+                c.key,
+                indent = c.depth * 2,
+            ));
+        }
+        out.push_str(&format!(
+            "  Items:  {} were filed there, {} are now in no collection; none was deleted.\n",
+            self.item_count, self.unfiled_count,
+        ));
+        out.push_str(&format!(
+            "  Local:  {}\n",
+            if self.synced_local {
+                "synced down, `zot collections` no longer lists it"
+            } else {
+                "not synced down yet; it is gone upstream but `zot collections` still lists it"
+            },
+        ));
+        out.push_str(&format!("  {}\n", self.note));
+        out
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct UnfiledOutput {
     /// Top-level items in no collection that can be filed as they are.
@@ -744,7 +816,8 @@ impl HumanDisplay for IndexIssuesOutput {
 #[cfg(test)]
 mod tests {
     use super::{
-        CollectionCreatedOutput, ExportOutput, HumanDisplay, format_output, truncate_display,
+        CollectionCreatedOutput, CollectionDeletedOutput, CollectionRemovedOutput, ExportOutput,
+        HumanDisplay, format_output, truncate_display,
     };
 
     fn export(exported: usize, path: Option<&str>, content: Option<&str>) -> ExportOutput {
@@ -796,6 +869,70 @@ mod tests {
         assert_eq!(v["synced_local"], true);
     }
 
+
+    fn deleted(descendants: &[(&str, &str, usize)], parent: Option<&str>) -> CollectionDeletedOutput
+    {
+        let mut removed = vec![CollectionRemovedOutput {
+            key: "OLDKEY12".to_string(),
+            name: "Papers".to_string(),
+            depth: 0,
+        }];
+        removed.extend(descendants.iter().map(|(key, name, depth)| {
+            CollectionRemovedOutput {
+                key: (*key).to_string(),
+                name: (*name).to_string(),
+                depth: *depth,
+            }
+        }));
+        CollectionDeletedOutput {
+            key: "OLDKEY12".to_string(),
+            name: "Papers".to_string(),
+            parent: parent.map(str::to_string),
+            descendant_count: removed.len() - 1,
+            removed,
+            item_count: 7,
+            unfiled_count: 3,
+            synced_local: true,
+            note: "Permanent: Zotero has no trash for collections, so unlike `zot rm` this \
+                   cannot be undone."
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn deleted_collection_lists_every_collection_that_went_with_it() {
+        let out = deleted(&[("SUB1", "Drafts", 1), ("SUB2", "Old", 2)], Some("ROOT1234"))
+            .human_display();
+        assert!(out.contains("Deleted collection: Papers [OLDKEY12]"), "{out}");
+        assert!(out.contains("3 collections (2 descendants)"), "{out}");
+        assert!(out.contains("Drafts [SUB1]"), "{out}");
+        assert!(out.contains("Old [SUB2]"), "{out}");
+        // The items are the thing a reader fears for, so the count says plainly
+        // that none of them went.
+        assert!(out.contains("7 were filed there, 3 are now in no collection"), "{out}");
+        assert!(out.contains("none was deleted"), "{out}");
+        assert!(out.contains("cannot be undone"), "{out}");
+    }
+
+    #[test]
+    fn deleted_leaf_collection_reports_one_collection_and_no_descendants() {
+        let out = deleted(&[], None).human_display();
+        assert!(out.contains("1 collection (0 descendants)"), "{out}");
+    }
+
+    #[test]
+    fn deleted_collection_json_is_one_document_with_a_null_parent_at_the_top_level() {
+        let out = format_output(&deleted(&[("SUB1", "Drafts", 1)], None), true);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("one JSON document");
+        assert_eq!(v["key"], "OLDKEY12");
+        assert!(v["parent"].is_null());
+        assert_eq!(v["descendant_count"], 1);
+        assert_eq!(v["removed"].as_array().expect("removed array").len(), 2);
+        assert_eq!(v["removed"][1]["key"], "SUB1");
+        assert_eq!(v["item_count"], 7);
+        assert_eq!(v["unfiled_count"], 3);
+        assert_eq!(v["synced_local"], true);
+    }
 
     #[test]
     fn short_string_is_unchanged() {

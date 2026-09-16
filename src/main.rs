@@ -184,7 +184,8 @@ enum Commands {
         contains: Option<String>,
     },
 
-    /// List the collection tree with item counts, or create a collection
+    /// List the collection tree with item counts, create a collection, or
+    /// permanently delete one
     Collections {
         /// Show only this collection's subtree (key, exact name, or tree-view
         /// ID like C42)
@@ -199,6 +200,21 @@ enum Commands {
         /// omit to create at the top level
         #[arg(long, value_name = "REF", requires = "create")]
         parent: Option<String>,
+
+        /// Permanently delete this collection and every subcollection under it
+        /// (key, exact name, or tree-view ID like C42). Irreversible: Zotero
+        /// has no trash for collections. The items in it are not deleted, only
+        /// unfiled. Asks for confirmation unless --force
+        #[arg(
+            long = "rm",
+            value_name = "REF",
+            conflicts_with_all = ["collection", "create", "parent", "flat", "tree_ids"]
+        )]
+        rm: Option<String>,
+
+        /// Delete without the --rm confirmation prompt, for scripted use
+        #[arg(long, requires = "rm")]
+        force: bool,
 
         /// One line per collection, without the tree indentation
         #[arg(long)]
@@ -432,15 +448,21 @@ fn main() {
             collection,
             create,
             parent,
+            rm,
+            force,
             flat,
             tree_ids,
         } => commands::collections_cmd::run_collections(
-            collection.as_deref(),
-            create.as_deref(),
-            parent.as_deref(),
-            flat,
-            tree_ids,
-            json,
+            commands::collections_cmd::CollectionsArgs {
+                collection: collection.as_deref(),
+                create: create.as_deref(),
+                parent: parent.as_deref(),
+                rm: rm.as_deref(),
+                force,
+                flat,
+                tree_ids,
+                json,
+            },
         ),
         Commands::Unfiled { count } => commands::unfiled_cmd::run_unfiled(count, json),
         Commands::Add {

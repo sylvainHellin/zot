@@ -77,7 +77,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
 | `zot tags` | List tags in the library; `--contains` filters. |
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
-| `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). |
+| `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). `--rm <ref>` permanently deletes one and every subcollection under it, after a typed confirmation (`--force` skips it); the items in it are unfiled, not deleted. |
 | `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
 | `zot export <key>...` | Export items as a bibliography rendered by Zotero. `--collection <ref>` exports a whole collection instead, `--format bibtex\|ris\|csljson` picks the format, `--output PATH` writes a file, `--raw` keeps the private BibTeX fields. |
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv/ISBN/PubMed identifier and/or PDF, locally via Zotero's connector API. |
@@ -316,6 +316,44 @@ The new collection reaches the local library on the next sync.
 The command waits up to 20 seconds for it and reports whether it arrived (`synced_local` under `--json`); a collection that has not arrived yet exists upstream regardless and appears in `zot collections` once Zotero syncs, so re-running `--create` would make a second one rather than retry the first.
 
 The output is the created collection alone, so `--create` cannot be combined with the listing flags `--flat` and `--tree-ids`.
+
+## Deleting a collection (`zot collections --rm`)
+
+```bash
+zot collections --rm ABCD1234            # by key
+zot collections --rm "Reading list"      # by exact name
+zot collections --rm C42                 # by connector tree-view ID
+zot collections --rm ABCD1234 --force    # no prompt, for scripts
+```
+
+**This is permanent.**
+Zotero has no trash for collections, so unlike `zot rm`, which moves items to a trash you can empty or restore from in the Zotero UI, a deleted collection cannot be brought back from anywhere.
+
+The items are not touched.
+Deleting a collection removes the grouping, not its contents: every item in it stays in the library, keeps any other collection it was filed in, and turns up in `zot unfiled` if that was its only one.
+
+The delete cascades.
+Deleting a collection deletes every subcollection beneath it, in one request, because api.zotero.org removes the descendants itself.
+That is the case worth being careful about, and it is why the command prints the whole subtree before asking.
+
+Before writing anything, it reports the collection's name and key, every descendant collection that goes with it, how many items are filed in that subtree, and how many of those would end up in no collection at all.
+Then it asks for confirmation on stderr, so `--json` stdout stays a single document:
+
+- a collection with no subcollections takes `yes`;
+- a collection with subcollections takes its own name, typed out, since the danger there is not knowing what hangs below the name you passed;
+- anything else aborts without writing.
+
+`--force` skips the prompt.
+Without it, a non-interactive stdin (a pipe, a cron job, an agent) is refused rather than prompted or silently allowed, and the refusal names what would have been removed.
+
+The summary is built from the local library while the cascade happens on api.zotero.org.
+Before asking anything, the command therefore reads every collection in the subtree from the server and compares its `meta.numCollections` with the children it is about to list.
+A subcollection created elsewhere and not yet synced down makes those counts disagree: the command refuses and tells you to sync Zotero, instead of prompting about a subtree it cannot show in full.
+A subtree of more than 50 collections is refused too, since checking it would mean 50 requests before the prompt; delete it in parts, or pass `--force` once you have checked it in the Zotero UI.
+The DELETE itself carries the collection's version, which rejects a concurrent write landing between that version being read and the delete going out.
+The command then waits up to 20 seconds for the removal to sync down and reports whether it arrived (`synced_local` under `--json`); until it does, `zot collections` still lists the tree even though it is gone upstream.
+
+`--rm` is rejected together with `--create`, `--parent`, the listing positional, `--flat` and `--tree-ids`.
 
 ## Where data lives
 

@@ -19,8 +19,8 @@ pub struct WebApiClient {
     user_id: u64,
 }
 
-/// A PATCH refused by `If-Unmodified-Since-Version`: the item changed between
-/// the read and the write, so nothing was written.
+/// A write refused by `If-Unmodified-Since-Version`: the object changed
+/// between the read and the write, so nothing was written.
 ///
 /// Typed rather than a plain message, because the remedy depends on the
 /// command: re-running is right for `zot edit`, but would add a second item
@@ -29,7 +29,7 @@ pub struct WebApiClient {
 #[derive(Debug)]
 pub struct VersionConflict {
     pub key: String,
-    /// Version the PATCH body was computed from.
+    /// Version the write was computed from.
     pub read_version: u64,
 }
 
@@ -109,8 +109,8 @@ impl WebApiClient {
         format!("{WEB_API_BASE}/users/{}/items{}", self.user_id, suffix)
     }
 
-    fn collections_url(&self) -> String {
-        format!("{WEB_API_BASE}/users/{}/collections", self.user_id)
+    fn collections_url(&self, suffix: &str) -> String {
+        format!("{WEB_API_BASE}/users/{}/collections{suffix}", self.user_id)
     }
 
     fn auth(&self, req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
@@ -228,7 +228,7 @@ impl WebApiClient {
             },
         }]);
         let resp = self
-            .auth(self.client.post(self.collections_url()))
+            .auth(self.client.post(self.collections_url("")))
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
@@ -244,6 +244,65 @@ impl WebApiClient {
         let v: Value =
             serde_json::from_str(&text).context("Failed to parse collection creation response")?;
         created_collection_key(&v)
+    }
+
+    /// Fetch a collection's current server-side JSON (for its version).
+    ///
+    /// The version lives at the top level as well as under `data`; both track
+    /// the same number, and the top-level one is read here because it is
+    /// present even on responses that omit `data`.
+    pub fn get_collection(&self, key: &str) -> Result<Value> {
+        let resp = self
+            .auth(self.client.get(self.collections_url(&format!("/{key}"))))
+            .send()
+            .context("Failed to fetch collection from web API")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            bail!(
+                "Collection {key} not found on api.zotero.org.\n  \
+                 If it exists locally, it may not have synced up yet -- sync Zotero and retry."
+            );
+        }
+        if !resp.status().is_success() {
+            bail!("Web API returned {} fetching collection {key}", resp.status());
+        }
+        resp.json().context("Failed to parse collection JSON")
+    }
+
+    /// DELETE one collection, using optimistic concurrency
+    /// (`If-Unmodified-Since-Version`).
+    ///
+    /// **Permanent.** Zotero has no trash for collections, so unlike
+    /// `patch_item`'s `deleted: true` there is nothing to restore afterwards.
+    /// The delete cascades: the collection's descendants go with it. Items
+    /// filed in any of them survive and become unfiled.
+    ///
+    /// `if_unmodified_version` must come from the caller's own read of this
+    /// collection, as for `patch_item`: a 412 means a concurrent write landed
+    /// in the window between that read and this DELETE, so it is fatal rather
+    /// than something to retry. That window is all it covers. It says nothing
+    /// about what the collection gained earlier, because Zotero versions
+    /// collections individually and creating a subcollection bumps the child's
+    /// version, not the parent's; `meta.numCollections` is the field that
+    /// reports a subcollection the caller never saw.
+    pub fn delete_collection(&self, key: &str, if_unmodified_version: u64) -> Result<()> {
+        let resp = self
+            .auth(self.client.delete(self.collections_url(&format!("/{key}"))))
+            .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
+            .send()
+            .context("Failed to DELETE collection")?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Err(VersionConflict {
+                key: key.to_string(),
+                read_version: if_unmodified_version,
+            }
+            .into());
+        }
+        let body = resp.text().unwrap_or_default();
+        bail!("Web API DELETE failed (status {status}): {}", body.trim());
     }
 
     /// Upload a file for an existing attachment item (Zotero 3-step flow:
