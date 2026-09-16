@@ -109,12 +109,15 @@ Implementation notes:
 - `ZoteroClient::fetch_collections()` (`src/api/client.rs:267`) already
   paginates the whole list and returns `ZoteroCollection`, whose `data` carries
   `name` and `parentCollection`. Building the tree is pure local work.
-- Item counts are the only extra cost. `/collections/<key>/items/top` returns
-  **direct members only** and gives no recursive count, so one request per
-  collection is both slow and insufficient. Cheaper and correct: fetch all
-  top-level items once (`/items/top`, paginated, ~463 items today), read each
-  item's `data.collections` array, tally direct counts, then roll up the tree
-  in memory.
+- Direct item counts come free: each entry in `/collections` carries
+  `meta.numItems` and `meta.numCollections` (verified 2026-09-16), so no
+  per-collection request is needed. `/collections/<key>/items/top` returns
+  **direct members only** and gives no recursive count either way.
+- Recursive counts must count *distinct* items, not the sum of direct counts:
+  143 of 465 top-level items belong to more than one collection today, so
+  summing up the tree double-counts visibly. Fetch all top-level items once
+  (`/items/top`, paginated, 465 items today), read each item's
+  `data.collections` array, and roll the tree up over a distinct-item set.
 - `--create` needs `POST /users/<id>/collections` on the web API, so it belongs
   with the other `WebApiClient` writes in `src/api/webapi.rs` and inherits the
   same sync caveat. Splitting it into a later pass is fine; listing is the part
