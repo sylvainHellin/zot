@@ -19,6 +19,34 @@ pub struct WebApiClient {
     user_id: u64,
 }
 
+/// A PATCH refused by `If-Unmodified-Since-Version`: the item changed between
+/// the read and the write, so nothing was written.
+///
+/// Typed rather than a plain message, because the remedy depends on the
+/// command: re-running is right for `zot edit`, but would add a second item
+/// under `zot add`. Its `Display` is the `zot edit` wording, which every
+/// caller that does not handle the type itself inherits.
+#[derive(Debug)]
+pub struct VersionConflict {
+    pub key: String,
+    /// Version the PATCH body was computed from.
+    pub read_version: u64,
+}
+
+impl std::fmt::Display for VersionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Item {} changed on api.zotero.org since it was read at version {}, so nothing was \
+             written.\n  Writing now would drop that other change -- re-run the same command to \
+             apply yours on top of it.",
+            self.key, self.read_version,
+        )
+    }
+}
+
+impl std::error::Error for VersionConflict {}
+
 impl WebApiClient {
     /// Build a client from stored config (`zot config set-key`), resolving and
     /// caching the numeric user ID on first use.
@@ -86,24 +114,37 @@ impl WebApiClient {
             .header("Zotero-API-Key", &self.api_key)
     }
 
-    /// Fetch an item's current server-side JSON (for version + field values).
-    pub fn get_item(&self, key: &str) -> Result<Value> {
+    /// Fetch an item's current server-side JSON, distinguishing "not there"
+    /// from "could not ask".
+    ///
+    /// `Ok(None)` is the 404 alone, which is what a caller waiting for a sync
+    /// should retry; a revoked key, a server error or a transport failure stay
+    /// `Err`, so such a caller gives up on them immediately.
+    pub fn get_item_opt(&self, key: &str) -> Result<Option<Value>> {
         let url = self.items_url(&format!("/{key}"));
         let resp = self
             .auth(self.client.get(&url))
             .send()
             .context("Failed to fetch item from web API")?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            bail!(
-                "Item {key} not found on api.zotero.org.\n  \
-                 If it exists locally, it may not have synced up yet -- sync Zotero and retry."
-            );
+            return Ok(None);
         }
         if !resp.status().is_success() {
             bail!("Web API returned {} fetching {key}", resp.status());
         }
         let v: Value = resp.json().context("Failed to parse item JSON")?;
-        Ok(v)
+        Ok(Some(v))
+    }
+
+    /// Fetch an item's current server-side JSON (for version + field values).
+    pub fn get_item(&self, key: &str) -> Result<Value> {
+        match self.get_item_opt(key)? {
+            Some(v) => Ok(v),
+            None => bail!(
+                "Item {key} not found on api.zotero.org.\n  \
+                 If it exists locally, it may not have synced up yet -- sync Zotero and retry."
+            ),
+        }
     }
 
     /// PATCH an item with the given partial `data` object, using optimistic
@@ -135,12 +176,11 @@ impl WebApiClient {
             return Ok(new_version);
         }
         if status == reqwest::StatusCode::PRECONDITION_FAILED {
-            bail!(
-                "Item {key} changed on api.zotero.org since it was read at version \
-                 {if_unmodified_version}, so nothing was written.\n  \
-                 Writing now would drop that other change -- re-run the same command to \
-                 apply yours on top of it."
-            );
+            return Err(VersionConflict {
+                key: key.to_string(),
+                read_version: if_unmodified_version,
+            }
+            .into());
         }
         let body = resp.text().unwrap_or_default();
         bail!("Web API PATCH failed (status {status}): {}", body.trim());

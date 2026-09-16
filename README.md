@@ -148,7 +148,8 @@ Items with `failed`, `partial`, or `suspicious` status are retried automatically
 
 ## Adding papers (`zot add`)
 
-`zot add` writes through the local connector API, the same endpoints the browser connector uses, so it needs no account, no API key, and no sync, just the running Zotero app.
+`zot add` writes through the local connector API, the same endpoints the browser connector uses, so a single-collection add needs no account, no API key, and no sync, just the running Zotero app.
+Filing into several collections is the exception: the connector takes one collection, and the rest go through the web API (see below).
 
 ```bash
 zot add 10.1038/nature14539                 # DOI (also doi.org URLs)
@@ -158,6 +159,7 @@ zot add --pdf paper.pdf                     # PDF only: Zotero's recognizer
 zot add 10.1000/xyz --pdf paper.pdf         # PDF + identifier (see below)
 zot add ... --collection KMHNIPDA           # collection key, exact name, or
                                             # tree-view ID (default: library root)
+zot add ... --collection Papers --collection "To Read"   # file in several
 zot add ... --tag agents --tag to-read      # tags on the new item
 zot add ... --force                         # skip the duplicate guard
 zot add ... --no-index                      # skip the automatic index refresh
@@ -170,6 +172,11 @@ Behavior worth knowing:
 - PDF recognition: with `--pdf`, the file is saved and Zotero's metadata recognizer creates the parent item, waiting until recognition finishes.
   An identifier given alongside the PDF is used only for the duplicate check and as a metadata fallback when recognition fails, so verify that the recognized metadata matches.
   If recognition fails entirely, the PDF is kept as a standalone attachment and, when an identifier was given, the metadata is imported separately; join them with `zot attach` or in the Zotero UI.
+- Several collections: `--collection` is repeatable and every value is resolved before anything is written, so a typo in the second one fails before the item exists.
+  The connector saves into one collection only, so the first is filed on the spot and the rest are added afterwards through the web API, which needs a configured key (`zot config set-key`) and is checked before the add rather than after it.
+  A library root (`L1`, or a group library's root) is only accepted as the sole value, since the collections after the first are written by collection key and a root has none; omitting `--collection` targets `L1` anyway.
+- The web API only sees the item once Zotero has synced it up, so filing into more than one collection waits for that sync, polling every 2s for up to 60s and reporting progress on stderr.
+  If the sync does not arrive in time the add still succeeds and exits 0, reporting the item as partially filed: it names the collections it is in, the ones it is not, and the exact `zot edit KEY --add-collection ...` to run once the sync catches up.
 - Index refresh: after a successful add, the search index updates incrementally so the paper is immediately findable via `zot search`.
 - No local delete: the connector API cannot remove items, so a mistaken add must be undone with `zot rm` (web API) or in the Zotero UI.
 - Identifiers beyond DOI and arXiv (ISBN, PubMed, plain URLs) are on the roadmap, see `BACKLOG.md`.

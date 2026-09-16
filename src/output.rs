@@ -389,8 +389,26 @@ impl HumanDisplay for IndexStatusOutput {
 #[derive(Debug, Serialize)]
 pub struct AddOutput {
     pub added: Vec<AddedItemOutput>,
+    /// Collection membership of the new item; `None` when no `--collection`
+    /// was given and the item went to the library root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collections: Option<AddCollectionsOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// Where the new item ended up, and what is still missing when only part of the
+/// filing went through.
+#[derive(Debug, Serialize)]
+pub struct AddCollectionsOutput {
+    /// Collections the item is in, as `Name (KEY)`.
+    pub filed: Vec<String>,
+    /// Requested collections that were not written.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<String>,
+    /// The `zot edit` command that files the pending ones by hand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_command: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,6 +435,20 @@ impl HumanDisplay for AddOutput {
                 ));
                 if !item.doi.is_empty() {
                     out.push_str(&format!("   DOI: {}\n", item.doi));
+                }
+            }
+        }
+        if let Some(c) = &self.collections {
+            if c.pending.is_empty() {
+                out.push_str(&format!("\nFiled in: {}\n", c.filed.join(", ")));
+            } else {
+                out.push_str(&format!(
+                    "\nPartially filed: in {}\n   NOT in: {}\n",
+                    c.filed.join(", "),
+                    c.pending.join(", "),
+                ));
+                if let Some(cmd) = &c.fix_command {
+                    out.push_str(&format!("   Finish with: {cmd}\n"));
                 }
             }
         }

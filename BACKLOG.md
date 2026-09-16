@@ -108,54 +108,25 @@ items (12 found).
 
 ## Collection filing on add and edit
 
-Filing is currently easy to get wrong in two separate ways. Sylvain's rule is
-that every added item belongs in at least one `2 Library` topic collection,
-plus a `1 References` paper collection when it is being cited by a specific
-manuscript. The CLI cannot express that in one command.
+Sylvain's rule is that every added item belongs in at least one `2 Library`
+topic collection, plus a `1 References` paper collection when it is being cited
+by a specific manuscript. Nothing in `zot add` pushes toward that: an add with
+no `--collection` silently produces an unfiled item.
 
-### 1. `zot add --collection` should be repeatable
+### `zot add` should not silently default to the library root
 
-Today it is `Option<&str>` (`AddArgs.collection`, `src/commands/add_cmd.rs:25`),
-so two-collection filing takes two commands across two APIs:
-
-```bash
-zot add 10.xxxx/yyy --collection KMHNIPDA
-zot edit KEY --patch '{"collections":["KMHNIPDA","ZSL8LTE2"]}'
-```
-
-Proposed: `--collection` repeatable, like `--tag` already is.
-
-```
-zot add 10.xxxx/yyy --collection KMHNIPDA --collection ZSL8LTE2
-```
-
-Implementation notes:
-- `resolve_target()` (`src/commands/add_cmd.rs:242`) already accepts a key, an
-  exact name, or a raw tree ID (`C42`) and errors helpfully on ambiguity.
-  Extend it to a `Vec`, resolving each independently so a typo in the second
-  collection fails before anything is written.
-- Use the first resolved collection as the connector `target` (that path is
-  unchanged and needs no key), then patch the full array via the web API for
-  the rest. Per the constraints section, that patch needs a bounded poll for
-  the item to appear upstream: retry `get_item` every ~2s up to ~60s, then warn
-  with the exact `zot edit --add-collection` command to run by hand rather than
-  failing silently.
-- The item is already filed in collection one at that point, so a failed poll
-  degrades to "partially filed", never to unfiled. Say so in the warning.
-
-### 2. `zot add` should not silently default to the library root
-
-With no `--collection`, `resolve_target` returns the library root and the item
-becomes an unfiled item. Nothing in the output says so, which is how 12 items
-accumulated there unnoticed.
+With no `--collection`, `ResolvedCollections::connector_target()`
+(`src/commands/add_cmd.rs`) returns the library root and the item becomes an
+unfiled item. Nothing in the output says so, which is how 12 items accumulated
+there unnoticed.
 
 Proposed: warn on stderr by default ("no --collection given; <title> is now an
 unfiled item"), and add `--no-collection` as the explicit opt-out for the rare
 standalone add. A hard error is the alternative, but it would break the
 legitimate "add now, file in the Zotero UI later" flow.
 
-Origin: 2026-09-16, same audit. The two-API dance and the silent root default
-were both found while checking whether the skill's filing rule was enforceable.
+Origin: 2026-09-16, same audit. The silent root default was found while
+checking whether the skill's filing rule was enforceable.
 
 ## zot unfiled -- list items in no collection
 

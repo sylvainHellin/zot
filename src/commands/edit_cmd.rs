@@ -278,7 +278,10 @@ impl ResolvedCollections {
 /// Merge collection membership: drop everything in `rm`, then append each entry
 /// of `add` that is not already present. The order of surviving entries is
 /// preserved, so an unrelated edit does not reshuffle the array.
-fn merge_collections(current: &[String], add: &[String], rm: &[String]) -> Vec<String> {
+///
+/// Shared with `zot add`, which files the collections the connector could not
+/// take through the same web API write.
+pub(super) fn merge_collections(current: &[String], add: &[String], rm: &[String]) -> Vec<String> {
     let mut merged: Vec<String> = current
         .iter()
         .filter(|c| !rm.contains(c))

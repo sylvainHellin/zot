@@ -181,10 +181,11 @@ enum Commands {
         #[arg(long)]
         pdf: Option<String>,
 
-        /// Target collection (key, exact name, or tree-view ID like C42).
-        /// Default: library root.
-        #[arg(long)]
-        collection: Option<String>,
+        /// Target collection (key, exact name, or tree-view ID like C42),
+        /// repeatable. Default: library root. The first is filed by the
+        /// connector, any further one via the web API after Zotero syncs.
+        #[arg(long = "collection")]
+        collections: Vec<String>,
 
         /// Tag(s) to set on the new item (repeatable)
         #[arg(long = "tag")]
@@ -370,14 +371,14 @@ fn main() {
         Commands::Add {
             identifier,
             pdf,
-            collection,
+            collections,
             tags,
             force,
             no_index,
         } => commands::add_cmd::run_add(commands::add_cmd::AddArgs {
             identifier: identifier.as_deref(),
             pdf: pdf.as_deref(),
-            collection: collection.as_deref(),
+            collections,
             tags,
             force,
             no_index,
