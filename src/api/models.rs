@@ -29,6 +29,8 @@ pub struct ZoteroItemData {
     pub item_type: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default, rename = "shortTitle")]
+    pub short_title: String,
     #[serde(default)]
     pub date: String,
     #[serde(default, rename = "abstractNote")]

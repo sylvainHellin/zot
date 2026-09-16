@@ -10,6 +10,7 @@ pub fn run_get(key: &str, json: bool) -> Result<()> {
     let output = ItemOutput {
         key: item.key.clone(),
         title: item.data.title.clone(),
+        short_title: item.data.short_title.clone(),
         item_type: item.data.item_type.clone(),
         creators: item
             .data

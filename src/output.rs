@@ -140,6 +140,7 @@ impl HumanDisplay for FindOutput {
 pub struct ItemOutput {
     pub key: String,
     pub title: String,
+    pub short_title: String,
     pub item_type: String,
     pub creators: Vec<CreatorOutput>,
     pub date: String,
@@ -167,6 +168,9 @@ impl HumanDisplay for ItemOutput {
         let mut out = format!("[{}] {}\n", self.key, self.title);
         out.push_str(&format!("Type: {}\n", self.item_type));
 
+        if !self.short_title.is_empty() {
+            out.push_str(&format!("Short title: {}\n", self.short_title));
+        }
         if !self.creators.is_empty() {
             let names: Vec<&str> = self.creators.iter().map(|c| c.name.as_str()).collect();
             out.push_str(&format!("Authors: {}\n", names.join("; ")));
