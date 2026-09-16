@@ -160,20 +160,36 @@ impl ZoteroItem {
 }
 
 /// Collection info from the Zotero API.
-/// Reserved for a future `collections` listing command; not constructed yet.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoteroCollection {
     pub key: String,
+    /// Library version at which this collection last changed. Read for
+    /// conditional writes once collection editing lands.
+    #[allow(dead_code)]
     pub version: u64,
+    #[serde(default)]
+    pub meta: ZoteroCollectionMeta,
     pub data: ZoteroCollectionData,
 }
 
-#[allow(dead_code)]
+/// Zotero's own tallies for a collection, used to cross-check the roll-up in
+/// `crate::collections`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZoteroCollectionMeta {
+    /// Items filed directly in this collection (not in its subcollections).
+    #[serde(default, rename = "numItems")]
+    pub num_items: u32,
+    /// Direct subcollections.
+    #[serde(default, rename = "numCollections")]
+    pub num_collections: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoteroCollectionData {
+    #[allow(dead_code)]
     pub key: String,
     pub name: String,
+    /// `false` when the collection is top-level, otherwise the parent's key.
     #[serde(default, rename = "parentCollection")]
     pub parent_collection: serde_json::Value,
 }

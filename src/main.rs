@@ -1,4 +1,5 @@
 mod api;
+mod collections;
 mod commands;
 mod config;
 mod index;

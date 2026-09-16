@@ -11,12 +11,12 @@
 //! New items are detected by diffing top-level item versions before/after,
 //! which works uniformly for both paths.
 
-use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 
 use crate::api::resolve::{self, Identifier};
 use crate::api::{ConnectorClient, SearchParams, ZoteroClient};
+use crate::collections::{LIBRARY_ROOT_ID, build_tree, resolve_collection_ref};
 use crate::output::{AddOutput, AddedItemOutput, format_output};
 
 pub struct AddArgs<'a> {
@@ -248,43 +248,19 @@ fn resolve_target(
     collection: Option<&str>,
 ) -> Result<String> {
     let Some(wanted) = collection else {
-        return Ok("L1".to_string());
+        return Ok(LIBRARY_ROOT_ID.to_string());
     };
 
     let targets = connector.list_targets()?;
+    let nodes = build_tree(&local.fetch_collections()?);
+    let resolved = resolve_collection_ref(wanted, &nodes, &targets)?;
 
-    // Raw tree-view ID (e.g. "L1", "C42").
-    if targets.iter().any(|t| t.id == wanted) {
-        return Ok(wanted.to_string());
-    }
-
-    // Collection key -> name via the local API, else treat input as a name.
-    let by_key: HashMap<String, String> = local
-        .fetch_collections()?
-        .into_iter()
-        .map(|c| (c.key, c.data.name))
-        .collect();
-    let name = by_key.get(wanted).map(|s| s.as_str()).unwrap_or(wanted);
-
-    let matches: Vec<_> = targets
-        .iter()
-        .filter(|t| t.id.starts_with('C') && t.name == name)
-        .collect();
-    match matches.len() {
-        1 => Ok(matches[0].id.clone()),
-        0 => bail!(
-            "Collection not found: {wanted}\n  \
-             Pass a collection key, exact collection name, or tree-view ID (e.g. C42)."
-        ),
-        _ => bail!(
-            "Collection name \"{name}\" is ambiguous ({} matches). \
-             Pass a tree-view ID instead: {}",
-            matches.len(),
-            matches
-                .iter()
-                .map(|t| format!("{} ({})", t.id, t.name))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+    resolved.connector_id.ok_or_else(|| {
+        anyhow!(
+            "Collection \"{}\" ({}) has no connector save target, so `zot add` cannot file into \
+             it.\n  Pass a tree-view ID (e.g. C42) instead.",
+            resolved.name,
+            resolved.key.as_deref().unwrap_or(wanted),
+        )
+    })
 }

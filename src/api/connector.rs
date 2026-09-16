@@ -29,7 +29,6 @@ pub struct SaveTarget {
     pub name: String,
     /// Nesting depth in the collection tree (0 = library root).
     #[serde(default)]
-    #[allow(dead_code)]
     pub level: u32,
 }
 

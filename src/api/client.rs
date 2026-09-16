@@ -184,6 +184,41 @@ impl ZoteroClient {
         Ok(all_items)
     }
 
+    /// Fetch all top-level items (paginated), including standalone
+    /// attachments and notes, which `fetch_all_items` filters out. `zot
+    /// collections` and `zot unfiled` need the unfiltered set: an item filed
+    /// in a collection is top-level, whatever its type.
+    #[allow(dead_code)] // consumed by `zot collections` / `zot unfiled` (plan 1.2, 1.5)
+    pub fn fetch_top_items(&self) -> Result<Vec<ZoteroItem>> {
+        let mut all_items = Vec::new();
+        let mut start = 0;
+        loop {
+            let url = format!(
+                "{}/items/top?limit={}&start={}",
+                self.base_url, PAGE_SIZE, start
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .context("Failed to fetch top-level items")?;
+            let total: usize = resp
+                .headers()
+                .get("Total-Results")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let items: Vec<ZoteroItem> = resp.json().context("Failed to parse top-level items")?;
+            let count = items.len();
+            all_items.extend(items);
+            start += count;
+            if count == 0 || start >= total {
+                break;
+            }
+        }
+        Ok(all_items)
+    }
+
     /// Fetch children of an item (to find attachments).
     pub fn fetch_children(&self, item_key: &str) -> Result<Vec<ZoteroItem>> {
         let url = format!("{}/items/{}/children", self.base_url, item_key);
