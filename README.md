@@ -197,7 +197,9 @@ zot rm A1B2C3D4 E5F6G7H8         # moves to trash (restorable in the UI)
 ```
 
 `--set` uses Zotero field names (`title`, `date`, `DOI`, `abstractNote`, `publicationTitle`, and so on), and unknown fields are rejected by the API.
-Edits use optimistic concurrency: they are version-checked and retried once on conflict.
+Edits use optimistic concurrency: the item is read once, the write is guarded by that
+version, and a conflicting change landing in between aborts the write untouched so the
+command can be re-run against the current state.
 
 `--add-collection` and `--rm-collection` are repeatable and take anything `zot collections` accepts: a collection key, an exact name, or a connector tree-view ID.
 Every value is resolved before anything is written, so a typo fails without a partial change, and the library root (`L1`) is rejected since "no collection" is not a collection.

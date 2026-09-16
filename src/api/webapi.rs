@@ -107,47 +107,43 @@ impl WebApiClient {
     }
 
     /// PATCH an item with the given partial `data` object, using optimistic
-    /// concurrency (`If-Unmodified-Since-Version`). Retries once on 412 by
-    /// refetching the version. Returns the new item version.
-    pub fn patch_item(&self, key: &str, data: &Value) -> Result<u64> {
-        let mut version = self
-            .get_item(key)?
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .context("No version on item")?;
-
-        for attempt in 0..2 {
-            let url = self.items_url(&format!("/{key}"));
-            let resp = self
-                .auth(self.client.patch(&url))
-                .header("If-Unmodified-Since-Version", version.to_string())
-                .header("Content-Type", "application/json")
-                .body(data.to_string())
-                .send()
-                .context("Failed to PATCH item")?;
-            let status = resp.status();
-            if status.is_success() {
-                let new_version = resp
-                    .headers()
-                    .get("Last-Modified-Version")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(version + 1);
-                return Ok(new_version);
-            }
-            if status == reqwest::StatusCode::PRECONDITION_FAILED && attempt == 0 {
-                // Concurrent modification; refetch version and retry once.
-                version = self
-                    .get_item(key)?
-                    .get("version")
-                    .and_then(|v| v.as_u64())
-                    .context("No version on item")?;
-                continue;
-            }
-            let body = resp.text().unwrap_or_default();
-            bail!("Web API PATCH failed (status {status}): {}", body.trim());
+    /// concurrency (`If-Unmodified-Since-Version`). Returns the new item version.
+    ///
+    /// `if_unmodified_version` must be the version of the read `data` was
+    /// computed from: a body that merges current state (tags, collections) is
+    /// a full replacement, so guarding it with any newer version would let a
+    /// concurrent change be silently overwritten. A 412 is therefore fatal --
+    /// the merge has to be redone against the new state, which only the caller
+    /// can do.
+    pub fn patch_item(&self, key: &str, data: &Value, if_unmodified_version: u64) -> Result<u64> {
+        let url = self.items_url(&format!("/{key}"));
+        let resp = self
+            .auth(self.client.patch(&url))
+            .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
+            .header("Content-Type", "application/json")
+            .body(data.to_string())
+            .send()
+            .context("Failed to PATCH item")?;
+        let status = resp.status();
+        if status.is_success() {
+            let new_version = resp
+                .headers()
+                .get("Last-Modified-Version")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(if_unmodified_version + 1);
+            return Ok(new_version);
         }
-        unreachable!()
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            bail!(
+                "Item {key} changed on api.zotero.org since it was read at version \
+                 {if_unmodified_version}, so nothing was written.\n  \
+                 Writing now would drop that other change -- re-run the same command to \
+                 apply yours on top of it."
+            );
+        }
+        let body = resp.text().unwrap_or_default();
+        bail!("Web API PATCH failed (status {status}): {}", body.trim());
     }
 
     /// Create items (POST). Returns the response JSON (`successful` map etc.).

@@ -76,15 +76,17 @@ pub fn run_edit(args: EditArgs) -> Result<()> {
         data.insert(field.trim().to_string(), json!(value));
     }
 
-    // Tag and collection changes both need the item's current state; fetch once.
+    // One read, whose version guards the write: tag and collection edits are
+    // full-array replacements computed from this snapshot, so the PATCH must be
+    // rejected if anything landed on the item after it.
     let tags_change = !add_tags.is_empty() || !rm_tags.is_empty();
-    let item = if tags_change || collection_edit.is_some() {
-        Some(web.get_item(key)?)
-    } else {
-        None
-    };
+    let item = web.get_item(key)?;
+    let version = item
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .context("No version on item")?;
 
-    if let (Some(item), true) = (item.as_ref(), tags_change) {
+    if tags_change {
         let mut tags: Vec<String> = item
             .pointer("/data/tags")
             .and_then(|t| t.as_array())
@@ -108,7 +110,7 @@ pub fn run_edit(args: EditArgs) -> Result<()> {
     // Collection membership is a plain array of collection keys.
     let mut collections_change: Option<String> = None;
     let mut collections_noop: Option<String> = None;
-    if let (Some(item), Some(edit)) = (item.as_ref(), collection_edit.as_ref()) {
+    if let Some(edit) = collection_edit.as_ref() {
         let current: Vec<String> = item
             .pointer("/data/collections")
             .and_then(|c| c.as_array())
@@ -145,11 +147,7 @@ pub fn run_edit(args: EditArgs) -> Result<()> {
     if data.is_empty() {
         // An idempotent request the library already satisfies succeeds: report
         // the untouched item rather than failing a well-formed instruction.
-        if let (Some(item), Some(note)) = (item.as_ref(), collections_noop) {
-            let version = item
-                .get("version")
-                .and_then(|v| v.as_u64())
-                .context("No version on item")?;
+        if let Some(note) = collections_noop {
             let output = EditOutput {
                 key: key.to_string(),
                 version,
@@ -169,7 +167,7 @@ pub fn run_edit(args: EditArgs) -> Result<()> {
             _ => field.clone(),
         })
         .collect();
-    let new_version = web.patch_item(key, &Value::Object(data))?;
+    let new_version = web.patch_item(key, &Value::Object(data), version)?;
 
     let output = EditOutput {
         key: key.to_string(),
