@@ -25,9 +25,6 @@ pub const LIBRARY_ROOT_ID: &str = "L1";
 const PATH_SEP: char = '\u{0}';
 
 /// One collection in the assembled tree.
-// Only the identity fields are read on the `zot add` path; the rest are the
-// payload of `zot collections` (plan 1.2) and are exercised by the unit tests.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CollectionNode {
     pub key: String,
@@ -47,10 +44,18 @@ pub struct CollectionNode {
     pub count_tree: usize,
     /// `meta.numItems` as reported by the API, for cross-checking
     /// `count_direct` against Zotero's own tally.
+    // Read only by the unit tests so far; the cross-check itself belongs to
+    // BACKLOG "zot collections -- list the collection tree", which records
+    // these two as the free per-collection tally.
+    #[allow(dead_code)]
     pub meta_num_items: u32,
     /// `meta.numCollections` as reported by the API, i.e. the number of direct
     /// children Zotero knows about.
+    #[allow(dead_code)]
     pub meta_num_collections: u32,
+    /// Connector tree-view ID (`C42`), filled by [`attach_connector_ids`] and
+    /// `None` until then (and for a collection the connector does not report).
+    pub tree_id: Option<String>,
 }
 
 /// A resolved collection reference.
@@ -140,6 +145,7 @@ pub fn build_tree(collections: &[ZoteroCollection]) -> Vec<CollectionNode> {
             count_tree: 0,
             meta_num_items: collection.meta.num_items,
             meta_num_collections: collection.meta.num_collections,
+            tree_id: None,
         });
         if let Some(kids) = children_of.get(&Some(collection.key.as_str())) {
             stack.extend(kids.iter().rev().map(|c| (*c, depth + 1)));
@@ -192,7 +198,6 @@ fn break_parent_cycles<'a>(
 ///
 /// `items` is expected to be top-level items (`fetch_top_items`); items filed
 /// in a collection that is not in `nodes` are ignored.
-#[allow(dead_code)] // consumed by `zot collections` (plan 1.2)
 pub fn roll_up_counts(nodes: &mut [CollectionNode], items: &[ZoteroItem]) {
     let known: HashSet<String> = nodes.iter().map(|n| n.key.clone()).collect();
 
@@ -222,6 +227,19 @@ pub fn roll_up_counts(nodes: &mut [CollectionNode], items: &[ZoteroItem]) {
         }
         node.count_tree = set.len();
         subtree.insert(node.key.clone(), set);
+    }
+}
+
+/// Fill `tree_id` on an assembled tree from the connector's save targets.
+///
+/// One pairing pass for the whole tree, which is what `zot collections
+/// --tree-ids` needs; calling [`resolve_collection_ref`] per node would repeat
+/// the pairing once per collection. A node the connector does not report keeps
+/// `tree_id == None`, and an empty `targets` leaves every node untouched.
+pub fn attach_connector_ids(nodes: &mut [CollectionNode], targets: &[SaveTarget]) {
+    let key_to_id = pair_connector_ids(nodes, targets);
+    for node in nodes.iter_mut() {
+        node.tree_id = key_to_id.get(node.key.as_str()).cloned();
     }
 }
 
@@ -633,6 +651,43 @@ mod tests {
 
         let empty = resolve_collection_ref("   ", &nodes, &targets).unwrap_err();
         assert!(format!("{empty}").contains("Empty collection reference"));
+    }
+
+    #[test]
+    fn attach_connector_ids_pairs_every_node_by_path() {
+        let (mut nodes, targets) = resolvable();
+        attach_connector_ids(&mut nodes, &targets);
+        let by_key: HashMap<&str, Option<&str>> = nodes
+            .iter()
+            .map(|n| (n.key.as_str(), n.tree_id.as_deref()))
+            .collect();
+        // Same pairing as `resolve_collection_ref`, in one pass: the two
+        // "Shared" collections are told apart by their parent path.
+        assert_eq!(by_key["ROOT1"], Some("C1"));
+        assert_eq!(by_key["CHILD1"], Some("C2"));
+        assert_eq!(by_key["ROOT2"], Some("C3"));
+        assert_eq!(by_key["CHILD2"], Some("C4"));
+        assert_eq!(by_key["ROOT3"], Some("C5"));
+    }
+
+    #[test]
+    fn attach_connector_ids_leaves_tree_ids_unset_without_targets() {
+        let (mut nodes, _) = resolvable();
+        attach_connector_ids(&mut nodes, &[]);
+        assert!(nodes.iter().all(|n| n.tree_id.is_none()));
+
+        // A node the connector does not report stays unpaired even when other
+        // nodes pair.
+        let mut nodes = build_tree(&[
+            collection("ROOT1", "Alpha", None),
+            collection("ROOT2", "Unreported", None),
+        ]);
+        attach_connector_ids(
+            &mut nodes,
+            &[target("L1", "My Library", 0), target("C1", "Alpha", 1)],
+        );
+        assert_eq!(nodes[0].tree_id.as_deref(), Some("C1"));
+        assert_eq!(nodes[1].tree_id, None);
     }
 
     #[test]

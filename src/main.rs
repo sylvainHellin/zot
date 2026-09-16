@@ -156,6 +156,21 @@ enum Commands {
         contains: Option<String>,
     },
 
+    /// List the collection tree with item counts
+    Collections {
+        /// Show only this collection's subtree (key, exact name, or tree-view
+        /// ID like C42)
+        collection: Option<String>,
+
+        /// One line per collection, without the tree indentation
+        #[arg(long)]
+        flat: bool,
+
+        /// Show connector tree-view IDs (C42) next to the collection keys
+        #[arg(long)]
+        tree_ids: bool,
+    },
+
     /// Add a paper to the library (by DOI/arXiv identifier and/or PDF)
     Add {
         /// Identifier: DOI (10.xxxx/..., doi.org URL) or arXiv ID/URL
@@ -334,6 +349,13 @@ fn main() {
         }
         Commands::Authors { contains } => {
             commands::authors_cmd::run_authors(contains.as_deref(), json)
+        }
+        Commands::Collections {
+            collection,
+            flat,
+            tree_ids,
+        } => {
+            commands::collections_cmd::run_collections(collection.as_deref(), flat, tree_ids, json)
         }
         Commands::Add {
             identifier,

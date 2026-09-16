@@ -240,6 +240,80 @@ impl HumanDisplay for TagsOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CollectionsOutput {
+    /// Collections listed (the whole library, or one subtree).
+    pub count: usize,
+    /// Distinct top-level items filed anywhere in the listed collections.
+    pub item_count: usize,
+    /// Key of the requested subtree root. Omitted from JSON for a full listing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    pub collections: Vec<CollectionOutput>,
+    /// Display-only: drop the depth indentation.
+    #[serde(skip)]
+    pub flat: bool,
+    /// Display-only: show connector tree-view IDs next to the keys.
+    #[serde(skip)]
+    pub show_tree_ids: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionOutput {
+    pub key: String,
+    pub name: String,
+    /// Key of the parent collection, always absolute. In a subtree listing the
+    /// requested root keeps the parent it has in the full tree, so that one
+    /// `parent` points at a collection outside the listing.
+    pub parent: Option<String>,
+    /// Relative to the listing root: in a subtree listing depth is rebased so
+    /// the requested root is 0, unlike `parent`, which stays absolute.
+    pub depth: usize,
+    pub count_direct: usize,
+    pub count_tree: usize,
+    /// Connector tree-view ID, `null` unless `--tree-ids` was passed and the
+    /// connector paired this collection. Always serialised, so the node shape
+    /// does not vary between runs.
+    pub tree_id: Option<String>,
+}
+
+impl HumanDisplay for CollectionsOutput {
+    fn human_display(&self) -> String {
+        // "filed" because this counts items filed in the listed collections,
+        // which is less than the library total: an item in no collection at
+        // all is never counted here.
+        let items = if self.item_count == 1 {
+            "1 filed item".to_string()
+        } else {
+            format!("{} filed items", self.item_count)
+        };
+        let mut out = match &self.root {
+            Some(root) => {
+                format!("Collections: {} (subtree of {root}, {items})\n\n", self.count)
+            }
+            None => format!("Collections: {} ({items})\n\n", self.count),
+        };
+        for c in &self.collections {
+            let indent = if self.flat { 0 } else { c.depth * 2 };
+            let ids = if self.show_tree_ids {
+                format!("{} {}", c.key, c.tree_id.as_deref().unwrap_or("-"))
+            } else {
+                c.key.clone()
+            };
+            out.push_str(&format!(
+                "  {:indent$}{} [{}] {} direct, {} total\n",
+                "",
+                c.name,
+                ids,
+                c.count_direct,
+                c.count_tree,
+                indent = indent,
+            ));
+        }
+        out
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct AuthorsOutput {
     pub count: usize,
     pub authors: Vec<String>,

@@ -77,6 +77,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
 | `zot tags` | List tags in the library; `--contains` filters. |
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
+| `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. |
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |

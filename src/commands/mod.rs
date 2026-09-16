@@ -1,6 +1,7 @@
 pub mod add_cmd;
 pub mod attach_cmd;
 pub mod authors_cmd;
+pub mod collections_cmd;
 pub mod config_cmd;
 pub mod edit_cmd;
 pub mod find_cmd;
