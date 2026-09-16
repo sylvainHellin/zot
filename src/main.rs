@@ -171,6 +171,13 @@ enum Commands {
         tree_ids: bool,
     },
 
+    /// List top-level items that are in no collection
+    Unfiled {
+        /// Print only the counts, for a scripted filing-drift check
+        #[arg(long)]
+        count: bool,
+    },
+
     /// Add a paper to the library (by DOI/arXiv identifier and/or PDF)
     Add {
         /// Identifier: DOI (10.xxxx/..., doi.org URL) or arXiv ID/URL
@@ -186,6 +193,11 @@ enum Commands {
         /// connector, any further one via the web API after Zotero syncs.
         #[arg(long = "collection")]
         collections: Vec<String>,
+
+        /// Add without filing: keep the library-root default and skip the
+        /// unfiled warning. Cannot be combined with --collection.
+        #[arg(long)]
+        no_collection: bool,
 
         /// Tag(s) to set on the new item (repeatable)
         #[arg(long = "tag")]
@@ -368,10 +380,12 @@ fn main() {
         } => {
             commands::collections_cmd::run_collections(collection.as_deref(), flat, tree_ids, json)
         }
+        Commands::Unfiled { count } => commands::unfiled_cmd::run_unfiled(count, json),
         Commands::Add {
             identifier,
             pdf,
             collections,
+            no_collection,
             tags,
             force,
             no_index,
@@ -379,6 +393,7 @@ fn main() {
             identifier: identifier.as_deref(),
             pdf: pdf.as_deref(),
             collections,
+            no_collection,
             tags,
             force,
             no_index,

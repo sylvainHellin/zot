@@ -12,3 +12,4 @@ pub mod pdf_cmd;
 pub mod rm_cmd;
 pub mod search_cmd;
 pub mod tags_cmd;
+pub mod unfiled_cmd;

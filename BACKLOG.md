@@ -56,7 +56,7 @@ had to curl the local API and post-process in Python.
 
 ## Collection filing -- the API constraints that shape all of it
 
-Shared background for the four entries that follow. Established by probing a
+Background for the collection entries that follow. Established by probing a
 live Zotero 7 instance on 2026-09-16; re-probe before trusting it.
 
 - **The local API is read-only.** `PATCH
@@ -105,49 +105,6 @@ Implementation notes:
 
 Origin: 2026-09-16, auditing why new items were landing in Zotero's unfiled
 items (12 found).
-
-## Collection filing on add and edit
-
-Sylvain's rule is that every added item belongs in at least one `2 Library`
-topic collection, plus a `1 References` paper collection when it is being cited
-by a specific manuscript. Nothing in `zot add` pushes toward that: an add with
-no `--collection` silently produces an unfiled item.
-
-### `zot add` should not silently default to the library root
-
-With no `--collection`, `ResolvedCollections::connector_target()`
-(`src/commands/add_cmd.rs`) returns the library root and the item becomes an
-unfiled item. Nothing in the output says so, which is how 12 items accumulated
-there unnoticed.
-
-Proposed: warn on stderr by default ("no --collection given; <title> is now an
-unfiled item"), and add `--no-collection` as the explicit opt-out for the rare
-standalone add. A hard error is the alternative, but it would break the
-legitimate "add now, file in the Zotero UI later" flow.
-
-Origin: 2026-09-16, same audit. The silent root default was found while
-checking whether the skill's filing rule was enforceable.
-
-## zot unfiled -- list items in no collection
-
-No way to audit filing drift. Finding the 12 unfiled items required fetching
-all 463 top-level items and filtering on an empty `data.collections` in Python.
-
-```
-zot unfiled                  # key, type, title for every unfiled top-level item
-zot unfiled --count          # just the number, for a scripted health check
-```
-
-Implementation notes:
-- Pure local read, no key needed, no index needed: page `/items/top` and keep
-  items whose `data.collections` is empty. The same item fetch that
-  `zot collections` needs for its counts, so the two share a helper.
-- Filter attachments and notes out by default. The audit turned up a stray
-  top-level `attachment` item (`SLJFJADB`, "norms") among real papers, which is
-  a different kind of problem and deserves its own line in the output rather
-  than being mixed in with unfiled papers.
-
-Origin: 2026-09-16, same audit.
 
 ## zot tags -- vocabulary enforcement and bulk cleanup
 

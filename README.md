@@ -78,6 +78,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot tags` | List tags in the library; `--contains` filters. |
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
 | `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. |
+| `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv identifier and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
@@ -160,6 +161,7 @@ zot add 10.1000/xyz --pdf paper.pdf         # PDF + identifier (see below)
 zot add ... --collection KMHNIPDA           # collection key, exact name, or
                                             # tree-view ID (default: library root)
 zot add ... --collection Papers --collection "To Read"   # file in several
+zot add ... --no-collection                 # library root on purpose, no warning
 zot add ... --tag agents --tag to-read      # tags on the new item
 zot add ... --force                         # skip the duplicate guard
 zot add ... --no-index                      # skip the automatic index refresh
@@ -177,9 +179,27 @@ Behavior worth knowing:
   A library root (`L1`, or a group library's root) is only accepted as the sole value, since the collections after the first are written by collection key and a root has none; omitting `--collection` targets `L1` anyway.
 - The web API only sees the item once Zotero has synced it up, so filing into more than one collection waits for that sync, polling every 2s for up to 60s and reporting progress on stderr.
   If the sync does not arrive in time the add still succeeds and exits 0, reporting the item as partially filed: it names the collections it is in, the ones it is not, and the exact `zot edit KEY --add-collection ...` to run once the sync catches up.
+- No collection: the item goes to the library root and becomes an unfiled item, which every collection-based view then misses, so the add warns on stderr and names the `zot edit KEY --add-collection ...` that files it.
+  `--no-collection` is the opt-out for a deliberate root add and silences the warning; it cannot be combined with `--collection`, and that contradiction is rejected before anything is written.
+  When the add produced only a standalone attachment (a PDF whose metadata Zotero could not recognize), the warning says so instead: that key is a stray to reparent with `zot attach <item-key> <file>`, which is what `zot unfiled` reports about it too.
+  The warning is stderr only, so `--json` stdout stays a single document, where the same fact reads as `collections: null`; that key is always serialised, so a strict consumer can test it.
 - Index refresh: after a successful add, the search index updates incrementally so the paper is immediately findable via `zot search`.
 - No local delete: the connector API cannot remove items, so a mistaken add must be undone with `zot rm` (web API) or in the Zotero UI.
 - Identifiers beyond DOI and arXiv (ISBN, PubMed, plain URLs) are on the roadmap, see `BACKLOG.md`.
+
+## Auditing filing (`zot unfiled`)
+
+```bash
+zot unfiled            # key, type and title for every unfiled top-level item
+zot unfiled --count    # just the number, for a scripted filing-drift check
+```
+
+A pure local read that needs no API key and no index: an item is unfiled when it sits at top level and belongs to no collection.
+
+Top-level attachments and notes are counted and listed apart from the rest.
+A standalone attachment with no parent is not a paper waiting to be filed, it is a file that wants reparenting or deleting, so acting on the main list never touches it.
+Under `--json` the two lists are `items` and `stray`, alongside the `count` and `stray_count` totals; `--count` sets both lists to `null`, which is distinct from the `[]` that means there are none.
+Human `--count` prints the unfiled count alone, so `N=$(zot unfiled --count)` is a number; `--count --json` is the way to a script that also wants `stray_count`.
 
 ## Editing the library (`zot edit`, `zot attach`, `zot rm`)
 

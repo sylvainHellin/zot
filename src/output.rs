@@ -314,6 +314,71 @@ impl HumanDisplay for CollectionsOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UnfiledOutput {
+    /// Top-level items in no collection that can be filed as they are.
+    pub count: usize,
+    /// Top-level attachments and notes in no collection. Counted apart because
+    /// a stray attachment wants reparenting or deleting, not filing.
+    pub stray_count: usize,
+    /// The items themselves, `null` under `--count`, where only the two counts
+    /// were asked for. An empty array means there are none.
+    pub items: Option<Vec<UnfiledItemOutput>>,
+    /// The stray attachments and notes, `null` under `--count` for the same
+    /// reason as `items`.
+    pub stray: Option<Vec<UnfiledItemOutput>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnfiledItemOutput {
+    pub key: String,
+    pub item_type: String,
+    pub title: String,
+}
+
+impl HumanDisplay for UnfiledOutput {
+    fn human_display(&self) -> String {
+        // Count mode: the bare number and nothing else, so `N=$(zot unfiled
+        // --count)` is a number rather than a report to parse. The stray total
+        // is still reachable, under `--count --json`.
+        if self.items.is_none() {
+            return self.count.to_string();
+        }
+        let mut out = format!("Unfiled items: {}\n", self.count);
+        if let Some(items) = &self.items {
+            out.push('\n');
+            for i in items {
+                out.push_str(&format!(
+                    "  [{}] {:16} {}\n",
+                    i.key,
+                    i.item_type,
+                    truncate_display(&i.title, 70),
+                ));
+            }
+        }
+        // Always printed, including at zero, so "no strays" is a stated result
+        // rather than a missing line.
+        out.push_str(&format!(
+            "\nStray top-level attachments and notes: {} (reparent or delete, do not file)\n",
+            self.stray_count,
+        ));
+        if let Some(stray) = &self.stray {
+            if !stray.is_empty() {
+                out.push('\n');
+            }
+            for i in stray {
+                out.push_str(&format!(
+                    "  [{}] {:16} {}\n",
+                    i.key,
+                    i.item_type,
+                    truncate_display(&i.title, 70),
+                ));
+            }
+        }
+        out
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct AuthorsOutput {
     pub count: usize,
     pub authors: Vec<String>,
@@ -391,7 +456,10 @@ pub struct AddOutput {
     pub added: Vec<AddedItemOutput>,
     /// Collection membership of the new item; `None` when no `--collection`
     /// was given and the item went to the library root.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Always serialised, `null` included: that `null` is the only
+    /// machine-readable signal that the add landed unfiled, and a consumer
+    /// cannot read a key that is not there.
     pub collections: Option<AddCollectionsOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,

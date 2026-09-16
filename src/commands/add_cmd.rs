@@ -34,6 +34,7 @@ pub struct AddArgs<'a> {
     pub identifier: Option<&'a str>,
     pub pdf: Option<&'a str>,
     pub collections: Vec<String>,
+    pub no_collection: bool,
     pub tags: Vec<String>,
     pub force: bool,
     pub no_index: bool,
@@ -41,6 +42,7 @@ pub struct AddArgs<'a> {
 }
 
 pub fn run_add(args: AddArgs) -> Result<()> {
+    check_collection_flags(args.no_collection, &args.collections)?;
     if args.identifier.is_none() && args.pdf.is_none() {
         bail!("Nothing to add: pass an identifier (DOI/arXiv) and/or --pdf <file>.");
     }
@@ -213,7 +215,7 @@ pub fn run_add(args: AddArgs) -> Result<()> {
         // alongside the item; the collections belong on the item.
         let item_key = added
             .iter()
-            .find(|a| a.item_type != "attachment" && a.item_type != "note")
+            .find(|a| !is_standalone(a))
             .or_else(|| added.first())
             .map(|a| a.key.clone());
         match item_key {
@@ -244,6 +246,10 @@ pub fn run_add(args: AddArgs) -> Result<()> {
         }
     }
 
+    if let Some(warning) = unfiled_warning(&args.collections, args.no_collection, &added) {
+        eprintln!("{warning}");
+    }
+
     let output = AddOutput {
         added,
         collections: wanted.output(pending, fix_command),
@@ -259,6 +265,80 @@ pub fn run_add(args: AddArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// An attachment or note with no parent of its own: `zot unfiled` calls it a
+/// stray, and it is not the item the collections belong on.
+fn is_standalone(a: &AddedItemOutput) -> bool {
+    a.item_type == "attachment" || a.item_type == "note"
+}
+
+/// The stderr warning for an add that landed in the library root without being
+/// asked to, or `None` when there is nothing to warn about.
+///
+/// An item in the library root is invisible to every collection-based view, so
+/// silence would hide it. The warning goes to stderr and deliberately not into
+/// `warnings`: that list is the record of a requested write that did not land,
+/// and a script watching it would start flagging every deliberate root add. The
+/// JSON carries the same fact, as `collections: null`.
+///
+/// A failed PDF recognition creates a standalone attachment and nothing else.
+/// That key is a stray to reparent, which is exactly what `zot unfiled` says
+/// about it, so the warning has to say the same rather than tell the user to
+/// file it.
+fn unfiled_warning(
+    collections: &[String],
+    no_collection: bool,
+    added: &[AddedItemOutput],
+) -> Option<String> {
+    if !collections.is_empty() || no_collection {
+        return None;
+    }
+    let item = added
+        .iter()
+        .find(|a| !is_standalone(a))
+        .or_else(|| added.first())?;
+    let key = &item.key;
+    let silence = "Pass --no-collection to add to the library root on purpose and silence this.";
+    if is_standalone(item) {
+        let (kind, remedy) = if item.item_type == "note" {
+            ("note", "Reparent it in the Zotero UI.".to_string())
+        } else {
+            (
+                "attachment",
+                "Put it under its item with: zot attach <item-key> <file> (or reparent it in \
+                 the Zotero UI)."
+                    .to_string(),
+            )
+        };
+        Some(format!(
+            "\nWarning: no --collection given, and [{key}] was saved as a standalone {kind}, \
+             which `zot unfiled` reports as a stray to reparent, not as an item to file.\n  \
+             {remedy}\n  {silence}"
+        ))
+    } else {
+        Some(format!(
+            "\nWarning: no --collection given, so [{key}] is an unfiled item.\n  \
+             File it with: zot edit {key} --add-collection <key|name|C42>\n  {silence}"
+        ))
+    }
+}
+
+/// `--no-collection` is the opt-out from filing, so naming a collection
+/// alongside it asks for two different things at once.
+///
+/// Checked before anything else in [`run_add`], so the contradiction costs no
+/// network call and can never half-write an item.
+fn check_collection_flags(no_collection: bool, collections: &[String]) -> Result<()> {
+    if no_collection && !collections.is_empty() {
+        bail!(
+            "--no-collection contradicts --collection {}: one files the item, the other \
+             deliberately does not.\n  Drop --no-collection to file it, or drop --collection \
+             to add it to the library root.",
+            collections.join(" --collection "),
+        );
+    }
     Ok(())
 }
 
@@ -566,13 +646,25 @@ fn poll_for_item(web: &WebApiClient, item_key: &str, extra: usize) -> Result<Val
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedCollections, edit_command};
+    use super::{ResolvedCollections, check_collection_flags, edit_command, unfiled_warning};
     use crate::api::connector::SaveTarget;
     use crate::api::models::ZoteroCollection;
     use crate::collections::{CollectionNode, build_tree};
     use crate::commands::edit_cmd::merge_collections;
-    use crate::output::{AddOutput, format_output};
+    use crate::output::{AddOutput, AddedItemOutput, format_output};
     use serde_json::json;
+
+    /// Only the key and the item type decide what the unfiled warning says.
+    fn added(key: &str, item_type: &str) -> AddedItemOutput {
+        AddedItemOutput {
+            key: key.to_string(),
+            title: format!("Title of {key}"),
+            item_type: item_type.to_string(),
+            creators: String::new(),
+            date: String::new(),
+            doi: String::new(),
+        }
+    }
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
@@ -624,6 +716,92 @@ mod tests {
     fn resolved(inputs: &[&str]) -> anyhow::Result<ResolvedCollections> {
         let (nodes, targets) = resolvable();
         ResolvedCollections::from_parts(&v(inputs), &nodes, &targets)
+    }
+
+    #[test]
+    fn no_collection_flag_and_a_named_collection_are_rejected_together() {
+        let err = check_collection_flags(true, &v(&["Alpha", "C3"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--no-collection contradicts --collection"), "{err}");
+        assert!(err.contains("Alpha --collection C3"), "{err}");
+
+        // Either flag on its own is fine, as is neither.
+        assert!(check_collection_flags(true, &[]).is_ok());
+        assert!(check_collection_flags(false, &v(&["Alpha"])).is_ok());
+        assert!(check_collection_flags(false, &[]).is_ok());
+    }
+
+    #[test]
+    fn an_unfiled_add_serialises_collections_as_an_explicit_null() {
+        // The absent key would be the only machine-readable signal that the add
+        // landed in the library root, and a strict consumer cannot test a key
+        // that is not there: `d["collections"]` raises in Python, and
+        // `data.collections === null` is false in JS.
+        let out = AddOutput {
+            added: vec![added("ITEMKEY1", "journalArticle")],
+            collections: None,
+            warnings: Vec::new(),
+        };
+        let text = format_output(&out, true);
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert!(
+            parsed.as_object().expect("object").contains_key("collections"),
+            "{text}"
+        );
+        assert_eq!(parsed["collections"], json!(null));
+    }
+
+    #[test]
+    fn an_add_with_no_collection_and_no_opt_out_warns_about_the_new_item() {
+        let items = vec![added("ITEMKEY1", "journalArticle")];
+        let w = unfiled_warning(&[], false, &items).expect("warning");
+        assert!(w.contains("[ITEMKEY1] is an unfiled item"), "{w}");
+        assert!(
+            w.contains("File it with: zot edit ITEMKEY1 --add-collection <key|name|C42>"),
+            "{w}"
+        );
+        assert!(w.contains("Pass --no-collection"), "{w}");
+    }
+
+    #[test]
+    fn the_unfiled_warning_is_silent_whenever_the_root_add_was_deliberate() {
+        let items = vec![added("ITEMKEY1", "journalArticle")];
+        // Asked for the library root on purpose.
+        assert!(unfiled_warning(&[], true, &items).is_none());
+        // Filed somewhere, so nothing is unfiled.
+        assert!(unfiled_warning(&v(&["Alpha"]), false, &items).is_none());
+        // Nothing was created, so there is no key to name.
+        assert!(unfiled_warning(&[], false, &[]).is_none());
+    }
+
+    #[test]
+    fn the_unfiled_warning_names_the_item_rather_than_its_attachment() {
+        // A recognized PDF add creates both; the collections, and the warning,
+        // belong on the parent item whatever order they come back in.
+        let items = vec![added("SLJFJADB", "attachment"), added("ITEMKEY1", "journalArticle")];
+        let w = unfiled_warning(&[], false, &items).expect("warning");
+        assert!(w.contains("[ITEMKEY1] is an unfiled item"), "{w}");
+        assert!(!w.contains("SLJFJADB"), "{w}");
+    }
+
+    #[test]
+    fn a_standalone_attachment_is_reported_as_a_stray_not_as_an_item_to_file() {
+        // Failed recognition with no identifier: the attachment is all there is,
+        // and `zot unfiled` calls it a stray, so telling the user to file it
+        // would contradict the other command about the same key.
+        let items = vec![added("SLJFJADB", "attachment")];
+        let w = unfiled_warning(&[], false, &items).expect("warning");
+        assert!(w.contains("[SLJFJADB] was saved as a standalone attachment"), "{w}");
+        assert!(w.contains("stray to reparent, not as an item to file"), "{w}");
+        assert!(w.contains("zot attach <item-key> <file>"), "{w}");
+        assert!(!w.contains("--add-collection"), "{w}");
+
+        let items = vec![added("NOTE0001", "note")];
+        let w = unfiled_warning(&[], false, &items).expect("warning");
+        assert!(w.contains("[NOTE0001] was saved as a standalone note"), "{w}");
+        assert!(w.contains("Reparent it in the Zotero UI"), "{w}");
+        assert!(!w.contains("--add-collection"), "{w}");
     }
 
     #[test]
