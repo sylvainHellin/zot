@@ -216,3 +216,52 @@ Implementation notes:
   than being mixed in with unfiled papers.
 
 Origin: 2026-09-16, same audit.
+
+## zot tags -- vocabulary enforcement and bulk cleanup
+
+`zot tags` lists tags but cannot judge or change them, so a controlled
+vocabulary has no enforcement point and import noise accumulates unchecked.
+
+State of the library on 2026-09-16: 61 manual tags (44 of them used exactly
+once) and **113 automatic tags across 383 uses**, the latter entirely
+arXiv/publisher subject headings. The automatic set is self-duplicating,
+carrying both arXiv spellings of the same category ("Artificial Intelligence
+(cs.AI)" 45 uses alongside "Computer Science - Artificial Intelligence" 21),
+and it encodes a topic the collection tree already models better. 52 items
+carry automatic tags and nothing else.
+
+```
+zot tags --automatic                 # list only type=1 tags, with use counts
+zot tags --purge-automatic           # delete every type=1 tag, library-wide
+zot tags --rename OLD NEW            # merge/normalise one tag everywhere
+zot tags --check                     # flag tags outside the controlled vocabulary
+zot tags --unused                    # tags on zero items
+```
+
+Implementation notes:
+- Tag type is already on the wire: each entry in an item's `data.tags` is
+  `{tag, type}` where `type: 1` means automatic and an absent `type` means
+  manual. `zot tags` currently collapses both, which is why the noise is
+  invisible.
+- Deletion is a single web API call per batch, not per item:
+  `DELETE /users/<id>/tags?tag=<url-encoded>||<tag2>||...` removes a tag from
+  every item at once, up to 50 tags per request. Rename has no direct endpoint;
+  it is add-new + delete-old across the affected items.
+- `--check` needs the vocabulary to live somewhere. Put it in the config
+  (`~/.config/zot/config.json`) as a list of allowed bare tags plus allowed
+  facet prefixes, so the CLI and the agent skill read the same source rather
+  than drifting apart.
+- Purging automatic tags fixes the backlog but not the inflow. Zotero keeps
+  adding them on import unless Settings -> General -> "Automatically tag items
+  with keywords and subject headings" is unchecked. `--purge-automatic` should
+  say so on completion, otherwise the count is back within a month.
+- Several manual tags are redundant with a field rather than with the tree, and
+  should be dropped rather than renamed: the `standard` tag matches
+  `itemType == standard` exactly (11 items, both directions), and tags like
+  `ISO 12006` / `DIN 1356` / `NCS` restate the `number` field that already
+  reads `DIN EN ISO 12006-2:2020-07`. A `--check` rule for field-redundant tags
+  would catch this class.
+
+Origin: 2026-09-16, designing a controlled tag vocabulary; the crosscutting
+axis (domain, genre, method) has to live in tags because a collection tree can
+only express one axis, which only works if the vocabulary is enforced.
