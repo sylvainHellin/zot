@@ -414,14 +414,11 @@ fn extract_child_fulltext(client: &ZoteroClient, item_key: &str) -> ExtractOutco
     // Prefer a PDF child: it is the richest source and always wins if present.
     for child in &children {
         if child.data.content_type == "application/pdf" {
-            match client.get_attachment_path(&child.key) {
-                Ok(Some(path)) => {
-                    let pdf_path = std::path::Path::new(&path);
-                    if pdf_path.exists() {
-                        return run_pdf_extraction(pdf_path, "");
-                    }
+            if let Ok(Some(path)) = client.get_attachment_path(&child.key) {
+                let pdf_path = std::path::Path::new(&path);
+                if pdf_path.exists() {
+                    return run_pdf_extraction(pdf_path, "");
                 }
-                Ok(None) | Err(_) => {}
             }
         }
     }
@@ -429,15 +426,12 @@ fn extract_child_fulltext(client: &ZoteroClient, item_key: &str) -> ExtractOutco
     // No usable PDF child: fall back to an HTML snapshot child if one exists.
     for child in &children {
         if child.data.content_type == "text/html" {
-            match client.get_attachment_path(&child.key) {
-                Ok(Some(path)) => {
-                    let html_path = std::path::Path::new(&path);
-                    if html_path.exists() {
-                        return crate::index::html::extract_snapshot(html_path, "html snapshot");
-                    }
-                    return no_attachment("html snapshot: file missing on disk");
+            if let Ok(Some(path)) = client.get_attachment_path(&child.key) {
+                let html_path = std::path::Path::new(&path);
+                if html_path.exists() {
+                    return crate::index::html::extract_snapshot(html_path, "html snapshot");
                 }
-                Ok(None) | Err(_) => {}
+                return no_attachment("html snapshot: file missing on disk");
             }
         }
     }

@@ -49,7 +49,7 @@ impl Reranker for BgeRerankerBase {
             .into_iter()
             .map(|r| RerankResult {
                 index: r.index,
-                score: r.score as f32,
+                score: r.score,
             })
             .collect();
 

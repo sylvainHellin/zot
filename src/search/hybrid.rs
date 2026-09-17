@@ -38,13 +38,12 @@ pub fn hybrid_search(
     // 3. RRF fusion
     let fused = rrf_fusion(&bm25_results, &vector_results);
 
-    // Over-fetch to account for deduplication by item_key
-    // (multiple chunks from the same paper collapse to one result)
-    let rerank_limit = if reranker.is_some() {
-        (limit * 5).min(fused.len())
-    } else {
-        (limit * 5).min(fused.len())
-    };
+    // Over-fetch to account for deduplication by item_key (multiple chunks
+    // from the same paper collapse to one result). The reranked and unreranked
+    // paths take the same candidate window: reranking reorders what it is
+    // given, so shrinking the window would cost recall in exactly the case
+    // that asked for more precision.
+    let rerank_limit = (limit * 5).min(fused.len());
     let top_candidates: Vec<(String, f32)> = fused.into_iter().take(rerank_limit).collect();
 
     if top_candidates.is_empty() {

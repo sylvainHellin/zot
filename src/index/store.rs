@@ -753,7 +753,7 @@ impl IndexStore {
             .filter(|(_, cid)| {
                 allowed_chunks
                     .as_ref()
-                    .map_or(true, |allowed| allowed.contains(*cid))
+                    .is_none_or(|allowed| allowed.contains(*cid))
             })
             .map(|(vec, cid)| {
                 let score = cosine_similarity(query_embedding, vec);
@@ -1130,6 +1130,47 @@ fn save_vectors(
     drop(file);
     fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Load vectors and chunk IDs from a binary file.
+fn load_vectors(path: &Path, expected_dim: usize) -> Result<(Vec<Vec<f32>>, Vec<String>)> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+
+    let mut buf4 = [0u8; 4];
+    file.read_exact(&mut buf4)?;
+    let count = u32::from_le_bytes(buf4) as usize;
+    file.read_exact(&mut buf4)?;
+    let dim = u32::from_le_bytes(buf4) as usize;
+
+    if dim != expected_dim {
+        bail!(
+            "Vector dimension mismatch: file has {dim}, expected {expected_dim}"
+        );
+    }
+
+    // Read chunk IDs
+    let mut chunk_ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        file.read_exact(&mut buf4)?;
+        let len = u32::from_le_bytes(buf4) as usize;
+        let mut id_buf = vec![0u8; len];
+        file.read_exact(&mut id_buf)?;
+        chunk_ids.push(String::from_utf8(id_buf)?);
+    }
+
+    // Read vectors
+    let mut vectors = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut vec = Vec::with_capacity(dim);
+        for _ in 0..dim {
+            file.read_exact(&mut buf4)?;
+            vec.push(f32::from_le_bytes(buf4));
+        }
+        vectors.push(vec);
+    }
+
+    Ok((vectors, chunk_ids))
 }
 
 #[cfg(test)]
@@ -1526,46 +1567,3 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 }
-
-/// Load vectors and chunk IDs from a binary file.
-fn load_vectors(path: &Path, expected_dim: usize) -> Result<(Vec<Vec<f32>>, Vec<String>)> {
-    use std::io::Read;
-    let mut file = fs::File::open(path)?;
-
-    let mut buf4 = [0u8; 4];
-    file.read_exact(&mut buf4)?;
-    let count = u32::from_le_bytes(buf4) as usize;
-    file.read_exact(&mut buf4)?;
-    let dim = u32::from_le_bytes(buf4) as usize;
-
-    if dim != expected_dim {
-        bail!(
-            "Vector dimension mismatch: file has {dim}, expected {expected_dim}"
-        );
-    }
-
-    // Read chunk IDs
-    let mut chunk_ids = Vec::with_capacity(count);
-    for _ in 0..count {
-        file.read_exact(&mut buf4)?;
-        let len = u32::from_le_bytes(buf4) as usize;
-        let mut id_buf = vec![0u8; len];
-        file.read_exact(&mut id_buf)?;
-        chunk_ids.push(String::from_utf8(id_buf)?);
-    }
-
-    // Read vectors
-    let mut vectors = Vec::with_capacity(count);
-    for _ in 0..count {
-        let mut vec = Vec::with_capacity(dim);
-        for _ in 0..dim {
-            file.read_exact(&mut buf4)?;
-            vec.push(f32::from_le_bytes(buf4));
-        }
-        vectors.push(vec);
-    }
-
-    Ok((vectors, chunk_ids))
-}
-
-

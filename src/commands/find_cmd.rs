@@ -3,18 +3,34 @@ use anyhow::Result;
 use crate::api::{SearchParams, ZoteroClient};
 use crate::output::{format_output, FindOutput, FindResultOutput};
 
-pub fn run_find(
-    query: &str,
-    tag: Option<&str>,
-    creator: Option<&str>,
-    item_type: Option<&str>,
-    collection: Option<&str>,
-    sort: Option<&str>,
-    desc: bool,
-    everything: bool,
-    limit: usize,
-    json: bool,
-) -> Result<()> {
+/// Arguments of `zot find`, bundled because the command takes more of them
+/// than a plain function signature should carry.
+pub struct FindArgs<'a> {
+    pub query: &'a str,
+    pub tag: Option<&'a str>,
+    pub creator: Option<&'a str>,
+    pub item_type: Option<&'a str>,
+    pub collection: Option<&'a str>,
+    pub sort: Option<&'a str>,
+    pub desc: bool,
+    pub everything: bool,
+    pub limit: usize,
+    pub json: bool,
+}
+
+pub fn run_find(args: FindArgs) -> Result<()> {
+    let FindArgs {
+        query,
+        tag,
+        creator,
+        item_type,
+        collection,
+        sort,
+        desc,
+        everything,
+        limit,
+        json,
+    } = args;
     let client = ZoteroClient::new()?;
 
     // If creator filter is set, append it to the query (REST API doesn't have a separate creator param)

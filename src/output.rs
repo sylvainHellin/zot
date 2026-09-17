@@ -1,5 +1,4 @@
 use serde::Serialize;
-use serde_json;
 
 /// Format output as either human-readable or JSON.
 pub fn format_output<T: Serialize + HumanDisplay>(data: &T, json: bool) -> String {
