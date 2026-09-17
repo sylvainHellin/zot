@@ -75,7 +75,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot get <key>` | Full metadata for an item. |
 | `zot fulltext <key>` | Stored fulltext for an item, from the local index. `--start`, `--end`, and `--max-chars` return a slice. |
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
-| `zot tags` | List tags in the library; `--contains` filters. |
+| `zot tags` | List tags in the library; `--contains` filters. `--automatic` lists only the tags Zotero imported itself, `--unused` those on no items, `--check` flags everything outside the controlled vocabulary. `--purge-automatic` deletes every automatic tag and `--rename OLD NEW` merges one tag into another, both after a typed confirmation (`--force` skips it). |
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
 | `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). `--rm <ref>` permanently deletes one and every subcollection under it, after a typed confirmation (`--force` skips it); the items in it are unfiled, not deleted. |
 | `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
@@ -355,6 +355,71 @@ The command then waits up to 20 seconds for the removal to sync down and reports
 
 `--rm` is rejected together with `--create`, `--parent`, the listing positional, `--flat` and `--tree-ids`.
 
+## Tag hygiene (`zot tags`)
+
+```bash
+zot tags                                     # everything, with use counts
+zot tags --automatic                         # only what Zotero imported itself
+zot tags --unused                            # tags on zero items
+zot tags --check                             # what breaks the vocabulary
+zot tags --rename "cs.AI" "method:llm"       # merge or normalise one tag
+zot tags --purge-automatic                   # delete every automatic tag
+```
+
+Zotero writes two kinds of tag. A manual one is typed by a person; an automatic one (`type: 1`) is a publisher or arXiv subject heading Zotero attaches on import.
+The automatic set is self-duplicating (`Artificial Intelligence (cs.AI)` next to `Computer Science - Artificial Intelligence`) and describes topics a collection tree models better, which is what `--automatic` and `--purge-automatic` exist to clear out.
+
+### The controlled vocabulary (`--check`)
+
+`--check` judges every tag against a vocabulary of allowed bare tags plus allowed facet prefixes, and reports what fails and why:
+
+| Class | Meaning |
+|---|---|
+| `automatic` | Imported by Zotero, never typed; goes with `--purge-automatic`. |
+| `field-redundant` | Only restates the item type or an identifier field, like a `standard` tag on `itemType: standard`, or `ISO 12006` where `number` already reads `DIN EN ISO 12006-2:2020-07`. Every item carrying the tag has to restate it, so a tag that says something real elsewhere is left alone. |
+| `unknown-facet-value` | Known prefix, unknown value: `method:transformers` where `method:` is closed. |
+| `out-of-vocabulary` | Neither an allowed bare tag nor any known prefix. |
+| `unused` | In the vocabulary, but on no items. |
+
+The vocabulary lives in the config (`~/.config/zot/config.json` on Linux), so the CLI and any filing convention read one source:
+
+```json
+{
+  "vocabulary": {
+    "allowed_tags": ["to-read", "reading", "read", "urgent", "graded"],
+    "facets": [
+      { "prefix": "kind:", "values": ["survey", "benchmark", "dataset", "position", "thesis"] },
+      { "prefix": "domain:", "values": ["aec", "bim", "construction-mgmt", "facility-mgmt"] },
+      { "prefix": "method:", "values": ["llm", "vlm", "agent", "rag", "kg", "cv"] },
+      { "prefix": "concept:", "values": [] },
+      { "prefix": "course:", "values": [] }
+    ]
+  }
+}
+```
+
+A facet with an empty `values` is open: any non-empty value passes, which is what a growing `concept:` list needs.
+A facet with values is closed, and anything else under that prefix is a typo or a term nobody agreed on.
+That block is also the built-in default, so `--check` is useful before the config has a `vocabulary` key at all; the output says which of the two it used.
+
+### Purging and renaming
+
+Both write through api.zotero.org and both ask first, printing the blast radius on stderr so `--json` stdout stays one document.
+
+`--purge-automatic` names how many tags and how many item uses go, lists the ten most used, and takes the tag count typed out as confirmation (`yes` below ten tags).
+Deletion is batched 50 tags per request, the web API maximum, and each batch is guarded with the library version it was computed from.
+The items themselves are never touched, only the tags come off them.
+On completion it says the part that decides whether the cleanup lasts: Zotero re-imports automatic tags on every new item unless *Settings → General → "Automatically tag items with keywords and subject headings"* is unchecked (`extensions.zotero.automaticTags`).
+Without that, the count is back within a month.
+
+`--rename OLD NEW` rewrites the tag on every item carrying it, then deletes the old tag library-wide.
+When `NEW` already exists the two merge, which cannot be undone (nothing records which item carried which), so a merge always takes the old tag typed out; a plain rename under ten items takes `yes`.
+The renamed tag is manual even when the old one was automatic, which is what stops Zotero treating it as its own again.
+Each item is re-read from the server immediately before its write, because a tag PATCH replaces the whole array, and a concurrent edit stops the run with a message rather than overwriting it.
+
+`--force` skips the prompt for scripts.
+Without it, a non-interactive stdin is refused rather than prompted, and the refusal names what would have been removed.
+
 ## Where data lives
 
 The local index is stored in the platform data directory, `~/Library/Application Support/zot/` on macOS and `~/.local/share/zot/` on Linux:
@@ -365,7 +430,7 @@ The local index is stored in the platform data directory, `~/Library/Application
   └── vectors.bin    # embedding vectors
 ```
 
-The web API key lives in the platform config directory, the same directory on macOS and `~/.config/zot/config.json` on Linux.
+The web API key and the controlled tag vocabulary live in the platform config directory, the same directory on macOS and `~/.config/zot/config.json` on Linux.
 
 To reset the index completely, delete the data directory or run `zot index --force`.
 

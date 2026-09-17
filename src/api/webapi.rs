@@ -13,6 +13,19 @@ use crate::config::Config;
 
 const WEB_API_BASE: &str = "https://api.zotero.org";
 
+/// Maximum number of tags the web API deletes in one request (v3 limit; more
+/// than this is answered with 413).
+pub const TAG_DELETE_BATCH: usize = 50;
+
+/// How many times a request throttled by api.zotero.org is retried before the
+/// command gives up and says so.
+const MAX_RETRIES: u32 = 3;
+
+/// Ceiling on any single wait asked for by `Backoff` or `Retry-After`. A
+/// server that asks for an hour gets a command that fails with a message
+/// instead of a terminal that looks hung.
+const MAX_WAIT_SECS: u64 = 120;
+
 pub struct WebApiClient {
     client: Client,
     api_key: String,
@@ -113,9 +126,120 @@ impl WebApiClient {
         format!("{WEB_API_BASE}/users/{}/collections{suffix}", self.user_id)
     }
 
+    fn tags_url(&self, suffix: &str) -> String {
+        format!("{WEB_API_BASE}/users/{}/tags{suffix}", self.user_id)
+    }
+
     fn auth(&self, req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
         req.header("Zotero-API-Version", "3")
             .header("Zotero-API-Key", &self.api_key)
+    }
+
+    /// Send a request, honouring Zotero's two throttling signals.
+    ///
+    /// `Backoff: <n>` can ride on any response, successful ones included, and
+    /// means "pause everything for n seconds"; `429` (and `503` during
+    /// maintenance) carries `Retry-After` and means "this request did not
+    /// happen, come back later". The first is honoured after the fact by
+    /// sleeping before the response is handed back, the second by retrying the
+    /// same request. `build` is a closure rather than a request because a
+    /// retried request has to be constructed again from scratch.
+    fn send_retrying(
+        &self,
+        build: impl Fn() -> reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response> {
+        let mut attempt = 0;
+        loop {
+            let resp = build().send().context("Failed to reach api.zotero.org")?;
+            let status = resp.status();
+            let throttled = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
+            if throttled && attempt < MAX_RETRIES {
+                let wait = header_secs(resp.headers(), "Retry-After")
+                    .or_else(|| header_secs(resp.headers(), "Backoff"))
+                    .unwrap_or(1 << attempt)
+                    .min(MAX_WAIT_SECS);
+                eprintln!(
+                    "api.zotero.org returned {status}; waiting {wait}s before retrying..."
+                );
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+                attempt += 1;
+                continue;
+            }
+            if let Some(secs) = header_secs(resp.headers(), "Backoff") {
+                let wait = secs.min(MAX_WAIT_SECS);
+                eprintln!("api.zotero.org asked for a {wait}s backoff; pausing...");
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+            }
+            return Ok(resp);
+        }
+    }
+
+    /// The library's current version, which is what a library-level write
+    /// (`delete_tags`) has to guard itself with.
+    ///
+    /// Read from the `Last-Modified-Version` header of the cheapest read there
+    /// is: every response carries it, and `format=versions&limit=1` keeps the
+    /// body to a single entry.
+    pub fn library_version(&self) -> Result<u64> {
+        let url = self.items_url("?format=versions&limit=1");
+        let resp = self.send_retrying(|| self.auth(self.client.get(&url)))?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("Web API returned {status} reading the library version");
+        }
+        resp.headers()
+            .get("Last-Modified-Version")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .context("No Last-Modified-Version header on the library read")
+    }
+
+    /// Delete up to [`TAG_DELETE_BATCH`] tags from the whole library at once.
+    ///
+    /// One request removes each tag from every item that carries it, which is
+    /// why this is a library-level write guarded by the *library* version
+    /// rather than any item's. A 412 therefore means anything at all changed in
+    /// the library since `if_unmodified_version` was read, not just these tags;
+    /// it comes back as a [`VersionConflict`] keyed `library` so the caller can
+    /// re-read and retry rather than bail blindly.
+    ///
+    /// The tags are URL-encoded individually and joined with a literal `||`,
+    /// which the server splits on before decoding. `Zotero-Write-Token` is
+    /// deliberately absent: the docs say it is for unversioned writes only.
+    pub fn delete_tags(&self, tags: &[String], if_unmodified_version: u64) -> Result<()> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        if tags.len() > TAG_DELETE_BATCH {
+            bail!(
+                "Refusing to delete {} tags in one request; the web API takes at most \
+                 {TAG_DELETE_BATCH}.",
+                tags.len(),
+            );
+        }
+        let url = self.tags_url(&format!("?tag={}", encode_tag_list(tags)));
+        let resp = self.send_retrying(|| {
+            self.auth(self.client.delete(&url))
+                .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
+        })?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // 428 is the docs' second versioning status; they do not say which
+        // condition picks which, so both mean "re-read the version and retry".
+        if status == reqwest::StatusCode::PRECONDITION_FAILED
+            || status == reqwest::StatusCode::PRECONDITION_REQUIRED
+        {
+            return Err(VersionConflict {
+                key: "library".to_string(),
+                read_version: if_unmodified_version,
+            }
+            .into());
+        }
+        let body = resp.text().unwrap_or_default();
+        bail!("Web API tag DELETE failed (status {status}): {}", body.trim());
     }
 
     /// Fetch an item's current server-side JSON, distinguishing "not there"
@@ -162,13 +286,13 @@ impl WebApiClient {
     /// can do.
     pub fn patch_item(&self, key: &str, data: &Value, if_unmodified_version: u64) -> Result<u64> {
         let url = self.items_url(&format!("/{key}"));
-        let resp = self
-            .auth(self.client.patch(&url))
-            .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
-            .header("Content-Type", "application/json")
-            .body(data.to_string())
-            .send()
-            .context("Failed to PATCH item")?;
+        let body = data.to_string();
+        let resp = self.send_retrying(|| {
+            self.auth(self.client.patch(&url))
+                .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+        })?;
         let status = resp.status();
         if status.is_success() {
             let new_version = resp
@@ -432,14 +556,52 @@ fn created_collection_key(resp: &Value) -> Result<String> {
         })
 }
 
+/// A `Backoff`/`Retry-After` header as whole seconds.
+///
+/// Only the delta-seconds form is read. `Retry-After` may also carry an HTTP
+/// date; Zotero documents it as seconds, and an unparseable value falls back to
+/// the caller's own schedule rather than to a guess.
+fn header_secs(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+}
+
+/// Build the `tag=` value of a multi-tag DELETE.
+///
+/// Each tag is percent-encoded, then joined with a bare `||`. The separator
+/// stays literal on purpose: the server has to split the query before decoding
+/// it, otherwise a tag containing a pipe would be indistinguishable from the
+/// separator. `urlencoding::encode` encodes `|` as `%7C`, so a tag can never
+/// forge one.
+fn encode_tag_list(tags: &[String]) -> String {
+    tags.iter()
+        .map(|t| urlencoding::encode(t).into_owned())
+        .collect::<Vec<_>>()
+        .join("||")
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::created_collection_key;
+    use super::{created_collection_key, encode_tag_list};
     use serde_json::json;
+
+    #[test]
+    fn encode_tag_list_keeps_the_separator_literal_and_encodes_the_tags() {
+        let tags = vec!["Computer Science".to_string(), "a|b".to_string()];
+        assert_eq!(encode_tag_list(&tags), "Computer%20Science||a%7Cb");
+    }
+
+    #[test]
+    fn encode_tag_list_handles_one_tag() {
+        assert_eq!(encode_tag_list(&["cs.AI".to_string()]), "cs.AI");
+    }
 
     /// Captured from `POST /users/<id>/collections` on api.zotero.org,
     /// 2026-09-16, trimmed of `library` and `links`.

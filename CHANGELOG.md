@@ -2,6 +2,20 @@
 
 Notable changes per release. Dates are release dates.
 
+## Unreleased
+
+### Added
+
+- `zot tags --automatic` and `--unused` list the tags Zotero imported itself and the tags on no items, with use counts.
+- `zot tags --check` flags every tag outside the controlled vocabulary, including tags that only restate the item type or an identifier field. The vocabulary is a list of allowed bare tags plus allowed facet prefixes, read from `vocabulary` in the config file; a default ships so the check works unconfigured.
+- `zot tags --purge-automatic` deletes every automatic tag library-wide, 50 per request, and says how to stop Zotero re-importing them.
+- `zot tags --rename OLD NEW` rewrites one tag everywhere and merges it into an existing tag when there is one. Both destructive paths print the blast radius and take a typed confirmation, as `zot collections --rm` does, with `--force` for scripts.
+
+### Fixed
+
+- Tag type is read from `meta.type`, where the API actually puts it on `/tags`, so automatic tags are no longer indistinguishable from manual ones.
+- Web API requests honour `Backoff` and retry on `429`/`503` with `Retry-After` instead of failing on a throttled response.
+
 ## v0.4.0 (2026-09-17)
 
 Collections became first-class, and a bibliography can leave the library without curl.

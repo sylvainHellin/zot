@@ -501,6 +501,49 @@ impl ZoteroClient {
         Ok(all)
     }
 
+    /// Fetch every item carrying `tag`, children included.
+    ///
+    /// `/items` rather than `/items/top`, because a tag can sit on a note or an
+    /// attachment and a rename that skipped those would leave the old tag alive
+    /// on them.
+    pub fn fetch_items_by_tag(&self, tag: &str) -> Result<Vec<ZoteroItem>> {
+        let mut all_items = Vec::new();
+        let mut start = 0;
+        loop {
+            let url = format!(
+                "{}/items?tag={}&limit={}&start={}",
+                self.base_url,
+                urlencoding::encode(tag),
+                PAGE_SIZE,
+                start,
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .context("Failed to fetch items by tag")?;
+            let status = resp.status();
+            if !status.is_success() {
+                bail!("Zotero returned {status} fetching items tagged \"{tag}\"");
+            }
+            let total: usize = resp
+                .headers()
+                .get("Total-Results")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let items: Vec<ZoteroItem> =
+                resp.json().context("Failed to parse items by tag")?;
+            let count = items.len();
+            all_items.extend(items);
+            start += count;
+            if count == 0 || start >= total {
+                break;
+            }
+        }
+        Ok(all_items)
+    }
+
     /// Fetch all tags from the library.
     pub fn fetch_tags(&self) -> Result<Vec<TagInfo>> {
         let mut all_tags = Vec::new();
@@ -549,16 +592,27 @@ pub struct SearchParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagInfo {
     pub tag: String,
-    #[serde(default, rename = "type")]
-    pub tag_type: Option<u32>,
     #[serde(default)]
     pub meta: TagMeta,
+}
+
+impl TagInfo {
+    /// Whether Zotero created this tag itself from publisher or arXiv subject
+    /// headings (`meta.type == 1`) rather than a person typing it.
+    pub fn is_automatic(&self) -> bool {
+        self.meta.tag_type == Some(1)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TagMeta {
     #[serde(default, rename = "numItems")]
     pub num_items: u32,
+    /// 1 = automatic, 0 or absent = manual. On `/tags` the type lives here,
+    /// under `meta`, not at the top level as it does inside an item's
+    /// `data.tags` (verified against the local API, Zotero 9.0.4).
+    #[serde(default, rename = "type")]
+    pub tag_type: Option<u32>,
 }
 
 use serde::{Deserialize, Serialize};

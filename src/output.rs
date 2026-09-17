@@ -277,20 +277,159 @@ impl HumanDisplay for FulltextOutput {
 #[derive(Debug, Serialize)]
 pub struct TagsOutput {
     pub count: usize,
+    /// Item uses summed over the listed tags. A tag on three items counts
+    /// three, so this is the noise measure, not the tag count.
+    pub uses: u32,
     pub tags: Vec<TagOutput>,
+    /// Display-only: what this listing is called in the human header.
+    #[serde(skip)]
+    pub heading: String,
+    /// Display-only: put the use total in that header. Off for the plain
+    /// listing, whose header line predates the field.
+    #[serde(skip)]
+    pub show_uses: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TagOutput {
     pub tag: String,
     pub num_items: u32,
+    /// Zotero imported this tag itself (`meta.type == 1`) rather than a person
+    /// typing it.
+    pub automatic: bool,
 }
 
 impl HumanDisplay for TagsOutput {
     fn human_display(&self) -> String {
-        let mut out = format!("Tags: {}\n\n", self.count);
+        let mut out = if self.show_uses {
+            format!("{}: {} ({} uses)\n\n", self.heading, self.count, self.uses)
+        } else {
+            format!("{}: {}\n\n", self.heading, self.count)
+        };
         for t in &self.tags {
             out.push_str(&format!("  {} ({})\n", t.tag, t.num_items));
+        }
+        out
+    }
+}
+
+/// The verdict of `zot tags --check`: every tag the vocabulary does not allow,
+/// with the rule that rejected it.
+#[derive(Debug, Serialize)]
+pub struct TagCheckOutput {
+    /// Tags examined (after `--contains`, if any).
+    pub checked: usize,
+    pub flagged: usize,
+    /// Where the vocabulary came from: the config file or the built-in default.
+    pub vocabulary_source: String,
+    pub issues: Vec<TagIssueOutput>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagIssueOutput {
+    pub tag: String,
+    pub num_items: u32,
+    pub automatic: bool,
+    /// Rule class: `automatic`, `field-redundant`, `unknown-facet-value`,
+    /// `out-of-vocabulary` or `unused`.
+    pub issue: String,
+    /// Why this tag tripped that rule, in one sentence.
+    pub detail: String,
+}
+
+impl HumanDisplay for TagCheckOutput {
+    fn human_display(&self) -> String {
+        if self.issues.is_empty() {
+            return format!(
+                "All {} tag(s) are in the controlled vocabulary ({}).\n",
+                self.checked, self.vocabulary_source,
+            );
+        }
+        let mut out = format!(
+            "{} of {} tag(s) are outside the controlled vocabulary ({}).\n",
+            self.flagged, self.checked, self.vocabulary_source,
+        );
+        // Grouped by rule, in the order the rules are worth acting on:
+        // automatic tags go wholesale, the rest one at a time.
+        for class in [
+            "automatic",
+            "field-redundant",
+            "unknown-facet-value",
+            "out-of-vocabulary",
+            "unused",
+        ] {
+            let group: Vec<&TagIssueOutput> =
+                self.issues.iter().filter(|i| i.issue == class).collect();
+            if group.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n{class} ({}):\n", group.len()));
+            for issue in group {
+                out.push_str(&format!(
+                    "  {} ({}) -- {}\n",
+                    issue.tag, issue.num_items, issue.detail,
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// What `zot tags --purge-automatic` removed.
+#[derive(Debug, Serialize)]
+pub struct TagsPurgedOutput {
+    pub deleted_count: usize,
+    /// Item uses the deleted tags accounted for.
+    pub uses_removed: u32,
+    /// DELETE requests it took (50 tags each).
+    pub batches: usize,
+    pub deleted: Vec<String>,
+    pub note: String,
+}
+
+impl HumanDisplay for TagsPurgedOutput {
+    fn human_display(&self) -> String {
+        format!(
+            "Deleted {} automatic tag(s) across {} item use(s), in {} request(s).\n{}\n",
+            self.deleted_count, self.uses_removed, self.batches, self.note,
+        )
+    }
+}
+
+/// What `zot tags --rename` changed.
+#[derive(Debug, Serialize)]
+pub struct TagRenamedOutput {
+    pub old: String,
+    pub new: String,
+    /// Items whose tag list was rewritten.
+    pub items_updated: usize,
+    /// Items that already carried the new tag, so the rename merged rather
+    /// than renamed there.
+    pub items_merged: usize,
+    /// The old tag was swept from the library afterwards.
+    pub removed_old_tag: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl HumanDisplay for TagRenamedOutput {
+    fn human_display(&self) -> String {
+        let mut out = format!(
+            "Renamed \"{}\" to \"{}\" on {} item(s)",
+            self.old, self.new, self.items_updated,
+        );
+        if self.items_merged > 0 {
+            out.push_str(&format!(
+                " ({} of them already carried \"{}\", so the two merged)",
+                self.items_merged, self.new,
+            ));
+        }
+        out.push_str(".\n");
+        if self.removed_old_tag {
+            out.push_str(&format!("  \"{}\" no longer exists in the library.\n", self.old));
+        }
+        if let Some(note) = &self.note {
+            out.push_str(&format!("  {note}\n"));
         }
         out
     }

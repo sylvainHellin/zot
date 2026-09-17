@@ -170,11 +170,46 @@ enum Commands {
         key: String,
     },
 
-    /// List tags in the library
+    /// List tags in the library, check them against the controlled
+    /// vocabulary, or clean them up in bulk
+    #[command(group(clap::ArgGroup::new("tag_mode")
+        .args(["automatic", "purge_automatic", "rename", "check", "unused"])))]
+    #[command(group(clap::ArgGroup::new("tag_write")
+        .args(["purge_automatic", "rename"])))]
     Tags {
         /// Filter tags containing this string
         #[arg(long)]
         contains: Option<String>,
+
+        /// List only the automatic tags Zotero imported itself (type 1),
+        /// with their use counts
+        #[arg(long)]
+        automatic: bool,
+
+        /// Delete every automatic tag from the whole library (web API plus
+        /// sync). Asks for confirmation unless --force
+        #[arg(long = "purge-automatic")]
+        purge_automatic: bool,
+
+        /// Rename a tag everywhere, merging it into NEW when that already
+        /// exists. The renamed tag is manual even if the old one was
+        /// automatic. Asks for confirmation unless --force
+        #[arg(long, num_args = 2, value_names = ["OLD", "NEW"])]
+        rename: Option<Vec<String>>,
+
+        /// Flag tags outside the controlled vocabulary, and tags that only
+        /// restate an item's type or one of its fields
+        #[arg(long)]
+        check: bool,
+
+        /// List only tags that are on no items
+        #[arg(long)]
+        unused: bool,
+
+        /// Skip the --purge-automatic / --rename confirmation prompt, for
+        /// scripted use
+        #[arg(long, requires = "tag_write")]
+        force: bool,
     },
 
     /// List authors/creators in the library
@@ -438,9 +473,27 @@ fn main() {
             max_chars,
         } => commands::fulltext_cmd::run_fulltext(&key, start, end, max_chars, json),
         Commands::Pdf { key } => commands::pdf_cmd::run_pdf(&key, json),
-        Commands::Tags { contains } => {
-            commands::tags_cmd::run_tags(contains.as_deref(), json)
-        }
+        Commands::Tags {
+            contains,
+            automatic,
+            purge_automatic,
+            rename,
+            check,
+            unused,
+            force,
+        } => commands::tags_cmd::run_tags(commands::tags_cmd::TagsArgs {
+            contains: contains.as_deref(),
+            automatic,
+            purge_automatic,
+            // `num_args = 2` guarantees both values are present.
+            rename: rename
+                .as_ref()
+                .map(|pair| (pair[0].as_str(), pair[1].as_str())),
+            check,
+            unused,
+            force,
+            json,
+        }),
         Commands::Authors { contains } => {
             commands::authors_cmd::run_authors(contains.as_deref(), json)
         }
