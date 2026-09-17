@@ -313,7 +313,7 @@ impl HumanDisplay for TagsOutput {
 }
 
 /// The verdict of `zot tags --check`: every tag the vocabulary does not allow,
-/// with the rule that rejected it.
+/// with the rule that rejected it, plus the per-item facet rules.
 #[derive(Debug, Serialize)]
 pub struct TagCheckOutput {
     /// Tags examined (after `--contains`, if any).
@@ -322,6 +322,31 @@ pub struct TagCheckOutput {
     /// Where the vocabulary came from: the config file or the built-in default.
     pub vocabulary_source: String,
     pub issues: Vec<TagIssueOutput>,
+    /// Top-level regular items the facet cardinalities were applied to.
+    pub items_checked: usize,
+    /// Items carrying more tags of one facet than it allows.
+    pub item_issues: Vec<ItemIssueOutput>,
+    /// Facets that require a tag on every item, and how many lack one.
+    pub missing: Vec<FacetMissingOutput>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ItemIssueOutput {
+    pub key: String,
+    pub title: String,
+    pub facet: String,
+    /// Rule class: `facet-conflict`.
+    pub issue: String,
+    pub detail: String,
+}
+
+/// One `exactly-one` facet and the items that carry none of it.
+#[derive(Debug, Serialize)]
+pub struct FacetMissingOutput {
+    pub facet: String,
+    pub item_count: usize,
+    /// A few of the item keys, so the count is actionable without `--json`.
+    pub sample: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,12 +361,48 @@ pub struct TagIssueOutput {
     pub detail: String,
 }
 
+impl TagCheckOutput {
+    /// The per-item half of the report: cardinality rules the tag listing
+    /// cannot express.
+    fn item_section(&self) -> String {
+        if self.item_issues.is_empty() && self.missing.iter().all(|m| m.item_count == 0) {
+            return String::new();
+        }
+        let mut out = format!("\nitems ({} checked):\n", self.items_checked);
+        for issue in &self.item_issues {
+            out.push_str(&format!(
+                "  [{}] {} -- {}\n",
+                issue.key,
+                truncate_display(&issue.title, 50),
+                issue.detail,
+            ));
+        }
+        for missing in &self.missing {
+            if missing.item_count == 0 {
+                continue;
+            }
+            out.push_str(&format!(
+                "  {} item(s) carry no {} tag, which the vocabulary requires",
+                missing.item_count, missing.facet,
+            ));
+            if missing.sample.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str(&format!(" (e.g. {})\n", missing.sample.join(", ")));
+            }
+        }
+        out
+    }
+}
+
 impl HumanDisplay for TagCheckOutput {
     fn human_display(&self) -> String {
         if self.issues.is_empty() {
             return format!(
-                "All {} tag(s) are in the controlled vocabulary ({}).\n",
-                self.checked, self.vocabulary_source,
+                "All {} tag(s) are in the controlled vocabulary ({}).\n{}",
+                self.checked,
+                self.vocabulary_source,
+                self.item_section(),
             );
         }
         let mut out = format!(
@@ -370,11 +431,12 @@ impl HumanDisplay for TagCheckOutput {
                 ));
             }
         }
+        out.push_str(&self.item_section());
         out
     }
 }
 
-/// What `zot tags --purge-automatic` removed.
+/// What `zot tags --purge-automatic` removed, and what it left alone.
 #[derive(Debug, Serialize)]
 pub struct TagsPurgedOutput {
     pub deleted_count: usize,
@@ -383,15 +445,35 @@ pub struct TagsPurgedOutput {
     /// DELETE requests it took (50 tags each).
     pub batches: usize,
     pub deleted: Vec<String>,
+    /// Tags that are automatic on some items and manual on others, which a
+    /// delete-by-name cannot separate, so they are kept.
+    pub skipped: Vec<SharedTagOutput>,
     pub note: String,
+}
+
+/// A tag name Zotero holds as automatic on some items and manual on others.
+#[derive(Debug, Serialize)]
+pub struct SharedTagOutput {
+    pub tag: String,
+    pub automatic_items: u32,
+    pub manual_items: u32,
 }
 
 impl HumanDisplay for TagsPurgedOutput {
     fn human_display(&self) -> String {
-        format!(
-            "Deleted {} automatic tag(s) across {} item use(s), in {} request(s).\n{}\n",
-            self.deleted_count, self.uses_removed, self.batches, self.note,
-        )
+        let mut out = format!(
+            "Deleted {} automatic tag(s) across {} item use(s), in {} request(s).\n",
+            self.deleted_count, self.uses_removed, self.batches,
+        );
+        if !self.skipped.is_empty() {
+            out.push_str(&format!(
+                "  Kept {} tag(s) that are manual on other items; see the summary above.\n",
+                self.skipped.len(),
+            ));
+        }
+        out.push_str(&self.note);
+        out.push('\n');
+        out
     }
 }
 

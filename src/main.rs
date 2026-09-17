@@ -177,8 +177,9 @@ enum Commands {
     #[command(group(clap::ArgGroup::new("tag_write")
         .args(["purge_automatic", "rename"])))]
     Tags {
-        /// Filter tags containing this string
-        #[arg(long)]
+        /// Filter tags containing this string. Rejected with
+        /// --purge-automatic and --rename, which act on the whole library
+        #[arg(long, conflicts_with = "tag_write")]
         contains: Option<String>,
 
         /// List only the automatic tags Zotero imported itself (type 1),
@@ -187,7 +188,8 @@ enum Commands {
         automatic: bool,
 
         /// Delete every automatic tag from the whole library (web API plus
-        /// sync). Asks for confirmation unless --force
+        /// sync), keeping any name that is also typed by hand on other items.
+        /// Asks for confirmation unless --force
         #[arg(long = "purge-automatic")]
         purge_automatic: bool,
 
@@ -197,8 +199,9 @@ enum Commands {
         #[arg(long, num_args = 2, value_names = ["OLD", "NEW"])]
         rename: Option<Vec<String>>,
 
-        /// Flag tags outside the controlled vocabulary, and tags that only
-        /// restate an item's type or one of its fields
+        /// Flag tags outside the controlled vocabulary, tags that only restate
+        /// an item's type or one of its fields, and items breaking a facet's
+        /// cardinality (two states, two kind: tags)
         #[arg(long)]
         check: bool,
 

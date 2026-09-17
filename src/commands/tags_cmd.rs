@@ -15,15 +15,18 @@ use crate::api::ZoteroClient;
 use crate::api::client::TagInfo;
 use crate::api::models::ZoteroItem;
 use crate::api::webapi::{TAG_DELETE_BATCH, VersionConflict, WebApiClient};
-use crate::config::{Config, Vocabulary};
+use crate::config::{Cardinality, Config, Facet, Vocabulary};
 use crate::output::{
-    TagCheckOutput, TagIssueOutput, TagOutput, TagRenamedOutput, TagsOutput, TagsPurgedOutput,
-    format_output,
+    FacetMissingOutput, ItemIssueOutput, SharedTagOutput, TagCheckOutput, TagIssueOutput,
+    TagOutput, TagRenamedOutput, TagsOutput, TagsPurgedOutput, format_output,
 };
 
 /// How many tags or items a confirmation summary lists before summarising the
 /// rest.
 const SAMPLE_SIZE: usize = 10;
+
+/// How many item keys a missing-tag count carries as examples.
+const MISSING_SAMPLE: usize = 5;
 
 /// Below this many objects a destructive tag command asks for `yes`; at or
 /// above it, the user types something specific to the operation. The line is
@@ -85,17 +88,25 @@ pub fn run_tags(args: TagsArgs) -> Result<()> {
     let client = ZoteroClient::new()?;
     let mut tags = client.fetch_tags()?;
 
-    // Filter by contains if specified
-    if let Some(filter) = contains {
-        let filter_lower = filter.to_lowercase();
-        tags.retain(|t| t.tag.to_lowercase().contains(&filter_lower));
-    }
-
     // Sort by tag name
     tags.sort_by_key(|t| t.tag.to_lowercase());
 
     if check {
-        return run_check(&client, &tags, json);
+        // Computed before `--contains` narrows anything: whether a name is
+        // also a manual tag is a fact about the library, not about the
+        // filtered view.
+        let manual = manual_items(&tags);
+        if let Some(filter) = contains {
+            let filter_lower = filter.to_lowercase();
+            tags.retain(|t| t.tag.to_lowercase().contains(&filter_lower));
+        }
+        return run_check(&client, &tags, &manual, json);
+    }
+
+    // Filter by contains if specified
+    if let Some(filter) = contains {
+        let filter_lower = filter.to_lowercase();
+        tags.retain(|t| t.tag.to_lowercase().contains(&filter_lower));
     }
 
     let heading = if automatic {
@@ -134,13 +145,19 @@ fn tags_output(tags: &[TagInfo], heading: &str) -> TagsOutput {
 
 // ---- --check ----
 
-/// Flag every tag the controlled vocabulary does not allow.
-fn run_check(client: &ZoteroClient, tags: &[TagInfo], json: bool) -> Result<()> {
+/// Flag every tag the controlled vocabulary does not allow, then every item
+/// whose tag set breaks a facet's cardinality.
+fn run_check(
+    client: &ZoteroClient,
+    tags: &[TagInfo],
+    manual: &HashMap<String, u32>,
+    json: bool,
+) -> Result<()> {
     let cfg = Config::load()?;
     let vocab = cfg.vocabulary();
-    // Field redundancy is a property of the items carrying the tag, so this
-    // read is what turns "unknown tag" into "unknown tag that the `number`
-    // field already says".
+    // Field redundancy is a property of the items carrying the tag, and
+    // cardinality is a property of an item's whole tag set, so this one read
+    // serves both halves of the check.
     let items = client.fetch_all_items()?;
     let by_tag = index_items_by_tag(&items);
 
@@ -150,7 +167,11 @@ fn run_check(client: &ZoteroClient, tags: &[TagInfo], json: bool) -> Result<()> 
             let redundancy = by_tag
                 .get(t.tag.as_str())
                 .and_then(|carriers| field_redundancy(carriers, &t.tag));
-            let (issue, detail) = classify_tag(t, &vocab, redundancy.as_deref())?;
+            let shared = t
+                .is_automatic()
+                .then(|| manual.get(&t.tag).copied())
+                .flatten();
+            let (issue, detail) = classify_tag(t, &vocab, redundancy.as_deref(), shared)?;
             Some(TagIssueOutput {
                 tag: t.tag.clone(),
                 num_items: t.meta.num_items,
@@ -161,14 +182,38 @@ fn run_check(client: &ZoteroClient, tags: &[TagInfo], json: bool) -> Result<()> 
         })
         .collect();
 
+    // Cardinality applies to the items a person files, not to the notes and
+    // attachments hanging under them, which carry tags of their own.
+    let checkable: Vec<&ZoteroItem> = items
+        .iter()
+        .filter(|i| i.is_regular_item() && i.data.parent_item.is_empty())
+        .collect();
+    let (item_issues, missing) = item_facet_issues(&checkable, &vocab);
+
     let output = TagCheckOutput {
         checked: tags.len(),
         flagged: issues.len(),
         vocabulary_source: vocabulary_source(&cfg),
         issues,
+        items_checked: checkable.len(),
+        item_issues,
+        missing,
     };
     println!("{}", format_output(&output, json));
     Ok(())
+}
+
+/// How many items carry each manual tag name.
+///
+/// Zotero stores the automatic/manual flag on the item-tag pair, not on the
+/// name, so `/tags` can return the same name twice. This map is what tells a
+/// type-1 entry whose name is also typed by hand from one that is purely
+/// imported.
+fn manual_items(tags: &[TagInfo]) -> HashMap<String, u32> {
+    tags.iter()
+        .filter(|t| !t.is_automatic())
+        .map(|t| (t.tag.clone(), t.meta.num_items))
+        .collect()
 }
 
 /// Where the vocabulary the check just applied came from.
@@ -206,14 +251,28 @@ fn classify_tag(
     tag: &TagInfo,
     vocab: &Vocabulary,
     redundancy: Option<&str>,
+    manual_elsewhere: Option<u32>,
 ) -> Option<(&'static str, String)> {
     if tag.is_automatic() {
-        return Some((
-            "automatic",
-            "imported by Zotero from publisher or arXiv subject headings; \
-             delete with --purge-automatic"
-                .to_string(),
-        ));
+        // A name Zotero holds as automatic here and manual there cannot be
+        // deleted by name without taking the manual assignments with it, so
+        // the advice has to differ from the ordinary imported tag's.
+        return Some(match manual_elsewhere {
+            Some(manual) => (
+                "automatic",
+                format!(
+                    "imported by Zotero, but the same name is typed by hand on {manual} other \
+                     item(s); --purge-automatic skips it, remove it per item with \
+                     `zot edit <key> --rm-tag`"
+                ),
+            ),
+            None => (
+                "automatic",
+                "imported by Zotero from publisher or arXiv subject headings; \
+                 delete with --purge-automatic"
+                    .to_string(),
+            ),
+        });
     }
     if let Some(detail) = redundancy {
         return Some(("field-redundant", detail.to_string()));
@@ -235,9 +294,135 @@ fn classify_tag(
         )),
         VocabVerdict::Unknown => Some((
             "out-of-vocabulary",
-            "neither an allowed bare tag nor a known facet prefix".to_string(),
+            "neither an allowed bare tag nor a value of any facet".to_string(),
         )),
     }
+}
+
+/// Which facet of the vocabulary a tag belongs to.
+#[derive(Debug, PartialEq, Eq)]
+enum FacetMatch<'a> {
+    /// A prefixed facet claims it; `allowed` says whether the value after the
+    /// prefix is one it accepts.
+    Prefixed { facet: &'a Facet, allowed: bool },
+    /// A bare facet lists it as one of its values.
+    Bare(&'a Facet),
+    /// Listed in `allowed_tags`, outside every facet.
+    Loose,
+    /// Nothing in the vocabulary matches.
+    None,
+}
+
+/// Place one tag in the vocabulary.
+///
+/// A prefixed facet claims a tag by its prefix alone, so a wrong value is
+/// reported against the facet it was aiming at instead of vanishing into
+/// "unknown tag". Matching folds case, because `Method:RAG` is the same
+/// mistake as a wrong value, not a different tag to chase separately.
+fn facet_match<'a>(tag: &str, vocab: &'a Vocabulary) -> FacetMatch<'a> {
+    let lower = tag.trim().to_lowercase();
+    let matches_value = |facet: &Facet, value: &str| {
+        facet
+            .values
+            .iter()
+            .any(|v| v.trim().to_lowercase() == value)
+    };
+    for facet in &vocab.facets {
+        match facet.prefix_with_colon() {
+            Some(prefix) => {
+                if let Some(rest) = lower.strip_prefix(&prefix.to_lowercase()) {
+                    let value = rest.trim();
+                    let allowed = !value.is_empty()
+                        && (facet.is_open() || matches_value(facet, value));
+                    return FacetMatch::Prefixed { facet, allowed };
+                }
+            }
+            None => {
+                if matches_value(facet, &lower) {
+                    return FacetMatch::Bare(facet);
+                }
+            }
+        }
+    }
+    if vocab
+        .allowed_tags
+        .iter()
+        .any(|t| t.trim().to_lowercase() == lower)
+    {
+        return FacetMatch::Loose;
+    }
+    FacetMatch::None
+}
+
+/// The facet cardinality rules, which the tag listing cannot express.
+///
+/// "Exactly one state" and "at most one `kind:`" are properties of an item's
+/// whole tag set, so they are checked here over the items rather than tag by
+/// tag. A missing required tag is counted rather than listed one item at a
+/// time: on a library mid-migration that class is every item, and a report
+/// nobody can read enforces nothing.
+fn item_facet_issues(
+    items: &[&ZoteroItem],
+    vocab: &Vocabulary,
+) -> (Vec<ItemIssueOutput>, Vec<FacetMissingOutput>) {
+    let constrained: Vec<&Facet> = vocab
+        .facets
+        .iter()
+        .filter(|f| !f.cardinality.allows_many())
+        .collect();
+    let mut missing: Vec<FacetMissingOutput> = constrained
+        .iter()
+        .filter(|f| f.cardinality == Cardinality::ExactlyOne)
+        .map(|f| FacetMissingOutput {
+            facet: f.label(),
+            item_count: 0,
+            sample: Vec::new(),
+        })
+        .collect();
+    let mut conflicts = Vec::new();
+
+    for item in items {
+        let mut by_facet: HashMap<String, Vec<&str>> = HashMap::new();
+        for tag in &item.data.tags {
+            let label = match facet_match(&tag.tag, vocab) {
+                FacetMatch::Prefixed {
+                    facet,
+                    allowed: true,
+                } => facet.label(),
+                FacetMatch::Bare(facet) => facet.label(),
+                // A tag the vocabulary rejects is already reported by name;
+                // counting it here would blame the item for the same fault
+                // twice.
+                _ => continue,
+            };
+            by_facet.entry(label).or_default().push(tag.tag.as_str());
+        }
+        for facet in &constrained {
+            let label = facet.label();
+            let carried = by_facet.get(&label).map(Vec::as_slice).unwrap_or(&[]);
+            if carried.len() > 1 {
+                conflicts.push(ItemIssueOutput {
+                    key: item.key.clone(),
+                    title: item.data.title.clone(),
+                    facet: label.clone(),
+                    issue: "facet-conflict".to_string(),
+                    detail: format!(
+                        "carries {} {label} tags where at most one is allowed: {}",
+                        carried.len(),
+                        carried.join(", "),
+                    ),
+                });
+            } else if carried.is_empty() && facet.cardinality == Cardinality::ExactlyOne {
+                if let Some(entry) = missing.iter_mut().find(|m| m.facet == label) {
+                    entry.item_count += 1;
+                    if entry.sample.len() < MISSING_SAMPLE {
+                        entry.sample.push(item.key.clone());
+                    }
+                }
+            }
+        }
+    }
+    (conflicts, missing)
 }
 
 /// What the vocabulary makes of one tag.
@@ -255,42 +440,25 @@ enum VocabVerdict {
 
 /// Judge one tag against the vocabulary.
 ///
-/// A facet with no configured values is open, so `concept:title-block` passes
-/// without the config listing every concept; a facet with values is closed, and
-/// an unknown value there is a typo or a term nobody agreed on yet. Matching
-/// folds case, because `Method:RAG` is the same mistake as a wrong value, not a
-/// different tag to chase separately.
+/// An open facet (no configured values) passes `concept:title-block` without
+/// the config listing every concept; a closed one rejects an unknown value as
+/// a typo or a term nobody agreed on yet.
 fn vocabulary_verdict(tag: &str, vocab: &Vocabulary) -> VocabVerdict {
-    let lower = tag.trim().to_lowercase();
-    for facet in &vocab.facets {
-        let prefix = facet.prefix_with_colon().to_lowercase();
-        if prefix.len() < 2 {
-            continue;
-        }
-        if let Some(rest) = lower.strip_prefix(&prefix) {
-            let value = rest.trim().to_string();
-            let allowed: Vec<String> = facet.values.iter().map(|v| v.to_lowercase()).collect();
-            if !value.is_empty() && (facet.is_open() || allowed.contains(&value)) {
-                return VocabVerdict::Allowed;
-            }
-            return VocabVerdict::UnknownValue {
-                facet: facet.prefix_with_colon(),
-                allowed: if facet.is_open() {
-                    vec!["any non-empty value".to_string()]
-                } else {
-                    facet.values.clone()
-                },
-            };
-        }
+    match facet_match(tag, vocab) {
+        FacetMatch::Prefixed {
+            facet,
+            allowed: false,
+        } => VocabVerdict::UnknownValue {
+            facet: facet.label(),
+            allowed: if facet.is_open() {
+                vec!["any non-empty value".to_string()]
+            } else {
+                facet.values.clone()
+            },
+        },
+        FacetMatch::None => VocabVerdict::Unknown,
+        _ => VocabVerdict::Allowed,
     }
-    if vocab
-        .allowed_tags
-        .iter()
-        .any(|t| t.trim().to_lowercase() == lower)
-    {
-        return VocabVerdict::Allowed;
-    }
-    VocabVerdict::Unknown
 }
 
 /// Whether a tag only restates something the items already record in a field.
@@ -379,15 +547,19 @@ fn token_run_contains(hay: &[String], needle: &[String]) -> bool {
 
 // ---- --purge-automatic ----
 
-/// What a purge would destroy.
+/// What a purge would destroy, and what it has to leave alone.
 #[derive(Debug)]
 struct PurgeScope {
-    /// Tag names, most used first.
+    /// Tag names to delete, most used first.
     tags: Vec<String>,
-    /// Item uses those tags account for.
+    /// Item uses those tags account for. Only the deletable ones: this is what
+    /// the DELETEs actually remove.
     uses: u32,
     /// `(tag, uses)` for the head of the list, for the summary.
     sample: Vec<(String, u32)>,
+    /// Names that are automatic on some items and manual on others, which a
+    /// delete-by-name cannot separate.
+    skipped: Vec<SharedTagOutput>,
 }
 
 /// How a destructive tag command is authorised.
@@ -402,22 +574,31 @@ enum Gate {
 /// Delete every automatic tag in the library.
 fn run_purge_automatic(force: bool, json: bool) -> Result<()> {
     let client = ZoteroClient::new()?;
-    let mut tags = client.fetch_tags()?;
-    tags.retain(TagInfo::is_automatic);
+    let tags = client.fetch_tags()?;
+    let scope = purge_scope(&tags);
 
-    if tags.is_empty() {
+    if scope.tags.is_empty() {
+        let note = if scope.skipped.is_empty() {
+            "  No automatic tags in the library; nothing was deleted.".to_string()
+        } else {
+            format!(
+                "  The only automatic tag(s) left are {} name(s) also typed by hand on other \
+                 items, which a delete-by-name would take with them; nothing was deleted.",
+                scope.skipped.len(),
+            )
+        };
         let output = TagsPurgedOutput {
             deleted_count: 0,
             uses_removed: 0,
             batches: 0,
             deleted: Vec::new(),
-            note: "  No automatic tags in the library; nothing was deleted.".to_string(),
+            skipped: scope.skipped,
+            note,
         };
         println!("{}", format_output(&output, json));
         return Ok(());
     }
 
-    let scope = purge_scope(&tags);
     let web = WebApiClient::from_config()?;
 
     // Everything the user reads goes to stderr, so `--json` stdout stays one
@@ -439,6 +620,7 @@ fn run_purge_automatic(force: bool, json: bool) -> Result<()> {
         uses_removed: scope.uses,
         batches,
         deleted,
+        skipped: scope.skipped,
         note: PURGE_NOTE.to_string(),
     };
     println!("{}", format_output(&output, json));
@@ -488,21 +670,40 @@ fn delete_tag_batch(web: &WebApiClient, chunk: &[String], done: usize) -> Result
 }
 
 /// Work out what purging the automatic tags would remove.
+///
+/// Zotero stores automatic-versus-manual on the item-tag pair, so `/tags` can
+/// return one name twice, type 1 on the items that imported it and type 0 on
+/// the items where it was typed. `DELETE /tags?tag=<name>` cannot tell those
+/// apart: it removes the name from every item at once. Such a name is
+/// therefore excluded here and reported as skipped, because deleting it would
+/// destroy hand-made assignments that no confirmation prompt ever mentioned
+/// (11 names, 17 manual uses, in the library this was written against).
 fn purge_scope(tags: &[TagInfo]) -> PurgeScope {
-    let mut ordered: Vec<(String, u32)> = tags
-        .iter()
-        .map(|t| (t.tag.clone(), t.meta.num_items))
-        .collect();
+    let manual = manual_items(tags);
+    let mut deletable: Vec<(String, u32)> = Vec::new();
+    let mut skipped: Vec<SharedTagOutput> = Vec::new();
+    for t in tags.iter().filter(|t| t.is_automatic()) {
+        match manual.get(&t.tag) {
+            Some(manual_items) => skipped.push(SharedTagOutput {
+                tag: t.tag.clone(),
+                automatic_items: t.meta.num_items,
+                manual_items: *manual_items,
+            }),
+            None => deletable.push((t.tag.clone(), t.meta.num_items)),
+        }
+    }
     // Most used first: the head of that list is what lets the user recognise
     // the set they are about to delete.
-    ordered.sort_by(|a, b| {
+    deletable.sort_by(|a, b| {
         b.1.cmp(&a.1)
             .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
     });
+    skipped.sort_by_key(|s| s.tag.to_lowercase());
     PurgeScope {
-        uses: ordered.iter().map(|(_, n)| n).sum(),
-        sample: ordered.iter().take(SAMPLE_SIZE).cloned().collect(),
-        tags: ordered.into_iter().map(|(t, _)| t).collect(),
+        uses: deletable.iter().map(|(_, n)| n).sum(),
+        sample: deletable.iter().take(SAMPLE_SIZE).cloned().collect(),
+        tags: deletable.into_iter().map(|(t, _)| t).collect(),
+        skipped,
     }
 }
 
@@ -549,6 +750,22 @@ fn purge_summary(scope: &PurgeScope) -> String {
             "    ... and {} more (see `zot tags --automatic`).\n",
             scope.tags.len() - scope.sample.len(),
         ));
+    }
+    if !scope.skipped.is_empty() {
+        out.push_str(&format!(
+            "  Keeping {} automatic tag(s) whose name is also typed by hand elsewhere, since \
+             the API deletes a tag from every item at once:\n",
+            scope.skipped.len(),
+        ));
+        for shared in &scope.skipped {
+            out.push_str(&format!(
+                "    {} ({} automatic, {} manual)\n",
+                shared.tag, shared.automatic_items, shared.manual_items,
+            ));
+        }
+        out.push_str(
+            "    Remove those one item at a time: zot edit <key> --rm-tag \"<tag>\"\n",
+        );
     }
     out.push_str(
         "  The items are NOT deleted, only these tags come off them.\n  \
@@ -604,6 +821,13 @@ fn run_rename(old: &str, new: &str, force: bool, json: bool) -> Result<()> {
 
     let scope = rename_scope(old, new, info, &items);
     let web = WebApiClient::from_config()?;
+    // The summary is built from the local library, the sweep at the end is a
+    // library-wide delete on the server, and the two part company whenever an
+    // item was tagged somewhere else and has not synced down. `--force`
+    // waives the confirmation, and this read with it.
+    if !force {
+        reconcile_tag_with_server(&web, &scope)?;
+    }
 
     let gate = rename_gate(&scope, target_exists, force, std::io::stdin().is_terminal())?;
     eprint!("{}", rename_summary(&scope, target_exists));
@@ -644,12 +868,18 @@ fn run_rename(old: &str, new: &str, force: bool, json: bool) -> Result<()> {
     }
 
     // Sweep: the tag record survives an item rewrite that left it on nothing,
-    // and only a library-level DELETE removes it. Reached only when every
-    // PATCH landed, so it can never delete a tag the rename failed to move.
-    let version = web.library_version()?;
-    let removed_old_tag = web
-        .delete_tags(std::slice::from_ref(&scope.old), version)
-        .is_ok();
+    // and only a library-level DELETE removes it. That DELETE takes the tag
+    // off every item that still carries it, so it runs only once the server
+    // agrees nothing does -- otherwise an item this run never saw would be
+    // stripped of the tag instead of having it renamed.
+    let stragglers = web.count_items_with_tag(&scope.old)?;
+    let removed_old_tag = stragglers == 0
+        && match web.library_version() {
+            Ok(version) => web
+                .delete_tags(std::slice::from_ref(&scope.old), version)
+                .is_ok(),
+            Err(_) => false,
+        };
 
     let output = TagRenamedOutput {
         old: scope.old,
@@ -657,14 +887,14 @@ fn run_rename(old: &str, new: &str, force: bool, json: bool) -> Result<()> {
         items_updated: updated,
         items_merged: scope.merges,
         removed_old_tag,
-        note: rename_note(scope.was_automatic, removed_old_tag),
+        note: rename_note(scope.was_automatic, removed_old_tag, stragglers),
     };
     println!("{}", format_output(&output, json));
     Ok(())
 }
 
 /// The trailing note of a rename.
-fn rename_note(was_automatic: bool, removed_old_tag: bool) -> Option<String> {
+fn rename_note(was_automatic: bool, removed_old_tag: bool, stragglers: u64) -> Option<String> {
     let mut parts = Vec::new();
     if was_automatic {
         parts.push(
@@ -674,14 +904,46 @@ fn rename_note(was_automatic: bool, removed_old_tag: bool) -> Option<String> {
         );
     }
     if !removed_old_tag {
-        parts.push(
-            "The old tag record could not be swept afterwards; check `zot tags --unused` and \
-             remove it in Zotero if it lingers."
-                .to_string(),
-        );
+        if stragglers > 0 {
+            parts.push(format!(
+                "{stragglers} item(s) on api.zotero.org still carry the old tag and were not \
+                 part of this run, so it was left in place rather than deleted from them; \
+                 sync Zotero and re-run the same command to finish."
+            ));
+        } else {
+            parts.push(
+                "The old tag record could not be swept afterwards; check `zot tags --unused` \
+                 and remove it in Zotero if it lingers."
+                    .to_string(),
+            );
+        }
     }
     parts.push("The changes reach the desktop app on the next Zotero sync.".to_string());
     Some(parts.join(" "))
+}
+
+/// Check the item list the summary is built from against api.zotero.org.
+///
+/// The rename patches the items the local library knows about and then sweeps
+/// the old tag library-wide. An item tagged on another device and not yet
+/// synced down is in neither the summary nor the patch loop, but the sweep
+/// reaches it, which would turn a rename into a silent delete on an item the
+/// user was never shown. `collections --rm` refuses the same way for the same
+/// reason.
+fn reconcile_tag_with_server(web: &WebApiClient, scope: &RenameScope) -> Result<()> {
+    let server = web.count_items_with_tag(&scope.old)?;
+    let local = scope.item_keys.len() as u64;
+    if server != local {
+        bail!(
+            "api.zotero.org has {server} item(s) tagged \"{}\", but the local library this \
+             summary is built from has {local}, so the rename would touch item(s) it cannot \
+             show you. Nothing was changed.\n  \
+             Sync Zotero so the two agree, then re-run `zot tags --rename`; pass --force to \
+             rename the {local} local item(s) anyway.",
+            scope.old,
+        );
+    }
+    Ok(())
 }
 
 /// Work out what renaming `old` to `new` would touch.
@@ -920,7 +1182,7 @@ mod tests {
         let vocab = Vocabulary::default();
         match vocabulary_verdict("method:transformers", &vocab) {
             VocabVerdict::UnknownValue { facet, allowed } => {
-                assert_eq!(facet, "method:");
+                assert_eq!(facet, "method");
                 assert!(allowed.contains(&"rag".to_string()));
             }
             other => panic!("expected UnknownValue, got {other:?}"),
@@ -997,15 +1259,27 @@ mod tests {
     fn classify_puts_automatic_first() {
         let vocab = Vocabulary::default();
         let t = tag("Artificial Intelligence (cs.AI)", 45, true);
-        let (class, _) = classify_tag(&t, &vocab, Some("whatever")).expect("flagged");
+        let (class, detail) = classify_tag(&t, &vocab, Some("whatever"), None).expect("flagged");
         assert_eq!(class, "automatic");
+        assert!(detail.contains("--purge-automatic"), "{detail}");
+    }
+
+    #[test]
+    fn classify_tells_an_automatic_tag_that_is_manual_elsewhere_apart() {
+        let vocab = Vocabulary::default();
+        let t = tag("BIM", 3, true);
+        let (class, detail) = classify_tag(&t, &vocab, None, Some(7)).expect("flagged");
+        assert_eq!(class, "automatic");
+        assert!(detail.contains("skips it"), "{detail}");
+        assert!(detail.contains("--rm-tag"), "{detail}");
     }
 
     #[test]
     fn classify_prefers_field_redundancy_over_the_vocabulary() {
         let vocab = Vocabulary::default();
         let t = tag("ISO 12006", 3, false);
-        let (class, detail) = classify_tag(&t, &vocab, Some("number says so")).expect("flagged");
+        let (class, detail) =
+            classify_tag(&t, &vocab, Some("number says so"), None).expect("flagged");
         assert_eq!(class, "field-redundant");
         assert_eq!(detail, "number says so");
     }
@@ -1013,14 +1287,137 @@ mod tests {
     #[test]
     fn classify_passes_a_vocabulary_tag_in_use() {
         let vocab = Vocabulary::default();
-        assert!(classify_tag(&tag("method:rag", 4, false), &vocab, None).is_none());
+        assert!(classify_tag(&tag("method:rag", 4, false), &vocab, None, None).is_none());
     }
 
     #[test]
     fn classify_flags_a_vocabulary_tag_on_no_items_as_unused() {
         let vocab = Vocabulary::default();
-        let (class, _) = classify_tag(&tag("method:cv", 0, false), &vocab, None).expect("flagged");
+        let (class, _) =
+            classify_tag(&tag("method:cv", 0, false), &vocab, None, None).expect("flagged");
         assert_eq!(class, "unused");
+    }
+
+    #[test]
+    fn a_purge_skips_a_name_that_is_manual_on_other_items() {
+        // Shape of the live library: `BIM` is type 1 on 3 items and type 0 on
+        // 7, and `DELETE /tags?tag=BIM` cannot tell those apart.
+        let tags = [
+            tag("BIM", 3, true),
+            tag("BIM", 7, false),
+            tag("cs.AI", 45, true),
+        ];
+        let scope = purge_scope(&tags);
+        assert_eq!(scope.tags, ["cs.AI"]);
+        assert_eq!(scope.uses, 45, "uses must count only what is deleted");
+        assert_eq!(scope.skipped.len(), 1);
+        assert_eq!(scope.skipped[0].tag, "BIM");
+        assert_eq!(scope.skipped[0].automatic_items, 3);
+        assert_eq!(scope.skipped[0].manual_items, 7);
+    }
+
+    #[test]
+    fn a_purge_summary_names_what_it_keeps_and_why() {
+        let tags = [tag("BIM", 3, true), tag("BIM", 7, false)];
+        let scope = purge_scope(&tags);
+        assert!(scope.tags.is_empty());
+        let summary = purge_summary(&scope);
+        assert!(summary.contains("BIM (3 automatic, 7 manual)"), "{summary}");
+        assert!(summary.contains("--rm-tag"), "{summary}");
+    }
+
+    #[test]
+    fn an_item_with_two_state_tags_is_a_facet_conflict() {
+        let vocab = Vocabulary::default();
+        let items = [item("journalArticle", json!({}), &["read", "to-read"])];
+        let refs: Vec<&ZoteroItem> = items.iter().collect();
+        let (conflicts, missing) = item_facet_issues(&refs, &vocab);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].facet, "state");
+        assert!(conflicts[0].detail.contains("read"), "{:?}", conflicts[0]);
+        assert_eq!(missing[0].item_count, 0);
+    }
+
+    #[test]
+    fn an_item_with_two_kind_tags_is_a_facet_conflict() {
+        let vocab = Vocabulary::default();
+        let items = [item(
+            "journalArticle",
+            json!({}),
+            &["read", "kind:survey", "kind:dataset"],
+        )];
+        let refs: Vec<&ZoteroItem> = items.iter().collect();
+        let (conflicts, _) = item_facet_issues(&refs, &vocab);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].facet, "kind");
+    }
+
+    #[test]
+    fn two_method_tags_are_fine_because_the_facet_allows_many() {
+        let vocab = Vocabulary::default();
+        let items = [item(
+            "journalArticle",
+            json!({}),
+            &["read", "method:rag", "method:llm"],
+        )];
+        let refs: Vec<&ZoteroItem> = items.iter().collect();
+        let (conflicts, missing) = item_facet_issues(&refs, &vocab);
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert_eq!(missing[0].item_count, 0);
+    }
+
+    #[test]
+    fn an_item_with_no_state_tag_is_counted_not_listed() {
+        let vocab = Vocabulary::default();
+        let items = [
+            item("journalArticle", json!({}), &["method:rag"]),
+            item("journalArticle", json!({}), &[]),
+        ];
+        let refs: Vec<&ZoteroItem> = items.iter().collect();
+        let (conflicts, missing) = item_facet_issues(&refs, &vocab);
+        assert!(conflicts.is_empty());
+        assert_eq!(missing.len(), 1, "only state is exactly-one");
+        assert_eq!(missing[0].facet, "state");
+        assert_eq!(missing[0].item_count, 2);
+        assert_eq!(missing[0].sample.len(), 2);
+    }
+
+    #[test]
+    fn a_bare_facet_value_is_in_the_vocabulary() {
+        let vocab = Vocabulary::default();
+        assert_eq!(vocabulary_verdict("urgent", &vocab), VocabVerdict::Allowed);
+        assert!(matches!(
+            facet_match("urgent", &vocab),
+            FacetMatch::Bare(_)
+        ));
+    }
+
+    #[test]
+    fn a_facet_given_only_a_prefix_is_labelled_by_it() {
+        let vocab = Vocabulary {
+            allowed_tags: Vec::new(),
+            facets: vec![Facet {
+                name: None,
+                prefix: Some("method".to_string()),
+                values: vec!["rag".to_string()],
+                cardinality: Cardinality::Any,
+            }],
+        };
+        assert_eq!(vocabulary_verdict("method:rag", &vocab), VocabVerdict::Allowed);
+        match vocabulary_verdict("method:nope", &vocab) {
+            VocabVerdict::UnknownValue { facet, .. } => assert_eq!(facet, "method:"),
+            other => panic!("expected UnknownValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_loose_allowed_tag_still_passes() {
+        let vocab = Vocabulary {
+            allowed_tags: vec!["_tablet".to_string()],
+            facets: Vec::new(),
+        };
+        assert_eq!(vocabulary_verdict("_tablet", &vocab), VocabVerdict::Allowed);
+        assert_eq!(facet_match("_tablet", &vocab), FacetMatch::Loose);
     }
 
     #[test]

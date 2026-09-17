@@ -7,13 +7,15 @@ Notable changes per release. Dates are release dates.
 ### Added
 
 - `zot tags --automatic` and `--unused` list the tags Zotero imported itself and the tags on no items, with use counts.
-- `zot tags --check` flags every tag outside the controlled vocabulary, including tags that only restate the item type or an identifier field. The vocabulary is a list of allowed bare tags plus allowed facet prefixes, read from `vocabulary` in the config file; a default ships so the check works unconfigured.
-- `zot tags --purge-automatic` deletes every automatic tag library-wide, 50 per request, and says how to stop Zotero re-importing them.
+- `zot tags --check` flags every tag outside the controlled vocabulary, including tags that only restate the item type or an identifier field, and every item that breaks a facet's cardinality (two states, two `kind:`). The vocabulary is a list of facets, bare or prefixed, each with its values and cardinality, read from `vocabulary` in the config file; a default ships so the check works unconfigured.
+- `zot tags --purge-automatic` deletes every automatic tag library-wide, 50 per request, and says how to stop Zotero re-importing them. A name that is automatic on some items and manual on others is kept and reported, since the API deletes a tag by name from every item at once.
 - `zot tags --rename OLD NEW` rewrites one tag everywhere and merges it into an existing tag when there is one. Both destructive paths print the blast radius and take a typed confirmation, as `zot collections --rm` does, with `--force` for scripts.
 
 ### Fixed
 
 - Tag type is read from `meta.type`, where the API actually puts it on `/tags`, so automatic tags are no longer indistinguishable from manual ones.
+- `zot tags --rename` checks its item list against api.zotero.org before asking, and sweeps the old tag only once the server agrees nothing carries it, so an item tagged on another device cannot be silently stripped instead of renamed.
+- `--contains` is rejected with `--purge-automatic` and `--rename` instead of being silently ignored by them.
 - Web API requests honour `Backoff` and retry on `429`/`503` with `Retry-After` instead of failing on a throttled response.
 
 ## v0.4.0 (2026-09-17)

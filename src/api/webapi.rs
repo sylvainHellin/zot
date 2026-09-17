@@ -195,6 +195,28 @@ impl WebApiClient {
             .context("No Last-Modified-Version header on the library read")
     }
 
+    /// How many items on api.zotero.org carry `tag`.
+    ///
+    /// Read from `Total-Results` on a one-row request, so the count costs one
+    /// small response whatever the library holds. Both tag types match, as on
+    /// the local API, which is what makes the two counts comparable.
+    pub fn count_items_with_tag(&self, tag: &str) -> Result<u64> {
+        let url = self.items_url(&format!(
+            "?tag={}&format=keys&limit=1",
+            urlencoding::encode(tag),
+        ));
+        let resp = self.send_retrying(|| self.auth(self.client.get(&url)))?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("Web API returned {status} counting items tagged \"{tag}\"");
+        }
+        resp.headers()
+            .get("Total-Results")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .context("No Total-Results header on the tagged-item count")
+    }
+
     /// Delete up to [`TAG_DELETE_BATCH`] tags from the whole library at once.
     ///
     /// One request removes each tag from every item that carries it, which is

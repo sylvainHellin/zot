@@ -75,7 +75,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot get <key>` | Full metadata for an item. |
 | `zot fulltext <key>` | Stored fulltext for an item, from the local index. `--start`, `--end`, and `--max-chars` return a slice. |
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
-| `zot tags` | List tags in the library; `--contains` filters. `--automatic` lists only the tags Zotero imported itself, `--unused` those on no items, `--check` flags everything outside the controlled vocabulary. `--purge-automatic` deletes every automatic tag and `--rename OLD NEW` merges one tag into another, both after a typed confirmation (`--force` skips it). |
+| `zot tags` | List tags in the library; `--contains` filters the listing and `--check`. `--automatic` lists only the tags Zotero imported itself, `--unused` those on no items, `--check` flags everything outside the controlled vocabulary plus the items that break a facet's cardinality. `--purge-automatic` deletes every automatic tag and `--rename OLD NEW` merges one tag into another, both library-wide and after a typed confirmation (`--force` skips it). |
 | `zot authors` | List authors and creators in the library; `--contains` filters. |
 | `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). `--rm <ref>` permanently deletes one and every subcollection under it, after a typed confirmation (`--force` skips it); the items in it are unfiled, not deleted. |
 | `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
@@ -366,40 +366,57 @@ zot tags --rename "cs.AI" "method:llm"       # merge or normalise one tag
 zot tags --purge-automatic                   # delete every automatic tag
 ```
 
-Zotero writes two kinds of tag. A manual one is typed by a person; an automatic one (`type: 1`) is a publisher or arXiv subject heading Zotero attaches on import.
+Zotero writes two kinds of tag. A manual one is typed by a person; an automatic one is a publisher or arXiv subject heading Zotero attaches on import.
+The flag lives on the item-tag pair, not on the name, so the same name can be automatic on one item and manual on another; `zot tags` lists such a name twice, once per type.
 The automatic set is self-duplicating (`Artificial Intelligence (cs.AI)` next to `Computer Science - Artificial Intelligence`) and describes topics a collection tree models better, which is what `--automatic` and `--purge-automatic` exist to clear out.
+
+`--contains` filters the listing and `--check`. It is rejected with `--purge-automatic` and `--rename`, which act on the whole library and would otherwise ignore it.
 
 ### The controlled vocabulary (`--check`)
 
-`--check` judges every tag against a vocabulary of allowed bare tags plus allowed facet prefixes, and reports what fails and why:
+`--check` judges every tag against the vocabulary and reports what fails and why:
 
 | Class | Meaning |
 |---|---|
-| `automatic` | Imported by Zotero, never typed; goes with `--purge-automatic`. |
+| `automatic` | Imported by Zotero, never typed; goes with `--purge-automatic`. If the same name is also typed by hand elsewhere, the entry says so, because a purge cannot remove it without taking the manual assignments too. |
 | `field-redundant` | Only restates the item type or an identifier field, like a `standard` tag on `itemType: standard`, or `ISO 12006` where `number` already reads `DIN EN ISO 12006-2:2020-07`. Every item carrying the tag has to restate it, so a tag that says something real elsewhere is left alone. |
 | `unknown-facet-value` | Known prefix, unknown value: `method:transformers` where `method:` is closed. |
-| `out-of-vocabulary` | Neither an allowed bare tag nor any known prefix. |
+| `out-of-vocabulary` | Neither an allowed bare tag nor a value of any facet. |
 | `unused` | In the vocabulary, but on no items. |
+
+A second pass judges the items rather than the names, because cardinality is a property of an item's whole tag set:
+
+| Class | Meaning |
+|---|---|
+| `facet-conflict` | The item carries more tags of one facet than it allows, like `to-read` next to `reading`. Listed one item at a time, with keys. |
+| missing | The item carries none of a facet that requires exactly one. Reported as a count with a few example keys, since on a library mid-migration that is most of them. |
+
+Only top-level regular items are judged; child notes and attachments carry tags of their own and are not filed by hand.
 
 The vocabulary lives in the config (`~/.config/zot/config.json` on Linux), so the CLI and any filing convention read one source:
 
 ```json
 {
   "vocabulary": {
-    "allowed_tags": ["to-read", "reading", "read", "urgent", "graded"],
+    "allowed_tags": [],
     "facets": [
-      { "prefix": "kind:", "values": ["survey", "benchmark", "dataset", "position", "thesis"] },
-      { "prefix": "domain:", "values": ["aec", "bim", "construction-mgmt", "facility-mgmt"] },
-      { "prefix": "method:", "values": ["llm", "vlm", "agent", "rag", "kg", "cv"] },
-      { "prefix": "concept:", "values": [] },
-      { "prefix": "course:", "values": [] }
+      { "name": "state", "values": ["to-read", "reading", "read"], "cardinality": "exactly-one" },
+      { "name": "flag", "values": ["urgent", "graded"] },
+      { "name": "kind", "prefix": "kind:", "values": ["survey", "benchmark", "dataset", "position", "thesis"], "cardinality": "at-most-one" },
+      { "name": "domain", "prefix": "domain:", "values": ["aec", "bim", "construction-mgmt", "facility-mgmt"] },
+      { "name": "method", "prefix": "method:", "values": ["llm", "vlm", "agent", "rag", "kg", "cv"] },
+      { "name": "concept", "prefix": "concept:", "values": [] },
+      { "name": "course", "prefix": "course:", "values": [], "cardinality": "at-most-one" }
     ]
   }
 }
 ```
 
-A facet with an empty `values` is open: any non-empty value passes, which is what a growing `concept:` list needs.
+A facet with a `prefix` matches tags carrying it; one without is bare, and its `values` are whole tags (`to-read`, `urgent`).
+A prefixed facet with empty `values` is open: any non-empty value passes, which is what a growing `concept:` list needs.
 A facet with values is closed, and anything else under that prefix is a typo or a term nobody agreed on.
+`cardinality` is `any` (the default), `at-most-one` or `exactly-one`, and is what the per-item pass enforces.
+`allowed_tags` is the escape hatch: bare tags allowed outside every facet, with no cardinality rule.
 That block is also the built-in default, so `--check` is useful before the config has a `vocabulary` key at all; the output says which of the two it used.
 
 ### Purging and renaming
@@ -409,6 +426,8 @@ Both write through api.zotero.org and both ask first, printing the blast radius 
 `--purge-automatic` names how many tags and how many item uses go, lists the ten most used, and takes the tag count typed out as confirmation (`yes` below ten tags).
 Deletion is batched 50 tags per request, the web API maximum, and each batch is guarded with the library version it was computed from.
 The items themselves are never touched, only the tags come off them.
+A name that is automatic on some items and manual on others is kept, listed in the summary with both counts: the API deletes a tag by name from every item at once, so purging it would destroy hand-made assignments.
+Remove those one item at a time with `zot edit <key> --rm-tag "<tag>"`.
 On completion it says the part that decides whether the cleanup lasts: Zotero re-imports automatic tags on every new item unless *Settings → General → "Automatically tag items with keywords and subject headings"* is unchecked (`extensions.zotero.automaticTags`).
 Without that, the count is back within a month.
 
@@ -416,6 +435,10 @@ Without that, the count is back within a month.
 When `NEW` already exists the two merge, which cannot be undone (nothing records which item carried which), so a merge always takes the old tag typed out; a plain rename under ten items takes `yes`.
 The renamed tag is manual even when the old one was automatic, which is what stops Zotero treating it as its own again.
 Each item is re-read from the server immediately before its write, because a tag PATCH replaces the whole array, and a concurrent edit stops the run with a message rather than overwriting it.
+
+The item list is built from the local library while the closing sweep is a library-wide delete on the server, so before asking anything the command compares its list with the number of items api.zotero.org reports for that tag.
+A disagreement means an item tagged elsewhere and not yet synced down, which the sweep would strip rather than rename; the command refuses and tells you to sync, or to pass `--force` to rename the local items anyway.
+The sweep itself runs only when the server agrees no item still carries the old tag; otherwise the tag is left in place and the output says how many stragglers stopped it.
 
 `--force` skips the prompt for scripts.
 Without it, a non-interactive stdin is refused rather than prompted, and the refusal names what would have been removed.
