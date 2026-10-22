@@ -3,14 +3,15 @@
 A CLI for querying and maintaining your local [Zotero](https://www.zotero.org/) library.
 It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv/ISBN/PubMed ID or PDF, edit metadata, attach files, and trash items.
 
-`zot` talks to the Zotero local HTTP API (the desktop app's built-in server at `http://localhost:23119`), so the library never leaves the machine and no Zotero web API key is required for reading.
+`zot` reads through the Zotero local HTTP API (the desktop app's built-in server at `http://localhost:23119`) whenever the app is running, since that is fastest and needs no key.
+When the app is closed it falls back to the Zotero web API (api.zotero.org) with the key from `zot config set-key`, so every command also works on a machine where the app is not open (see [Without the desktop app](#without-the-desktop-app)).
 For semantic search it builds a local index (embeddings plus a Tantivy full-text index) on disk.
 
 ## Requirements
 
 - Rust toolchain (`cargo`), installed via [rustup](https://rustup.rs/).
-- Zotero desktop running, with the local API enabled under *Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"*.
-  The app must be open when you run `zot`.
+- Zotero desktop running, with the local API enabled under *Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"*, or a web API key configured with `zot config set-key` for use without the app.
+  With both, the app is used when it answers and the web API otherwise.
 - First use of `--rerank` downloads a BGE reranker model of about 1 GB (cached by `fastembed`).
   The default embedding model is small and downloads automatically.
 
@@ -239,6 +240,23 @@ Behavior worth knowing:
 - Index refresh: after a successful add, the search index updates incrementally so the paper is immediately findable via `zot search`.
 - No local delete: the connector API cannot remove items, so a mistaken add must be undone with `zot rm` (web API) or in the Zotero UI.
 - Adding by plain URL is on the roadmap, see `BACKLOG.md`; it needs Zotero's web translators, which the connector API does not expose.
+- With the desktop app closed, `zot add` creates the item through the web API instead (see the next section).
+
+## Without the desktop app
+
+Every command first probes the local API.
+When the app does not answer and a web API key is configured, `zot` prints one note on stderr and serves the command from api.zotero.org instead.
+The web library is the synced one, so it can be ahead of a desktop install that has not synced for a while.
+`ZOT_BACKEND=local` or `ZOT_BACKEND=web` forces one side; the default `auto` picks as above.
+
+What changes on the web side:
+
+- Reads (`find`, `get`, `authors`, `tags`, `unfiled`, `collections`, `export`, the `search` sync check, and the reads behind `edit`) use the same queries against api.zotero.org and return the same output, a little slower.
+- `zot pdf` and `zot index` need the file on disk: a copy under the Zotero data directory (`~/Zotero`, or `ZOTERO_DATA_DIR`) is used when its MD5 matches the server's, and otherwise the file is downloaded once into `<cache>/zot/attachments/<key>/` and reused while it stays current.
+- `zot add` with an identifier converts the resolved BibTeX to a Zotero item and creates it in one request with all its collections and tags, so there is no sync wait and no partial filing.
+  A PDF is uploaded as the item's attachment.
+  A PDF without an identifier has no recognizer to go to, so `zot add` looks for a DOI or arXiv ID on its first page and uses that, with a warning to check the match; when it finds none, the PDF is saved as a standalone attachment and the warning says to re-run with the identifier.
+- Collections resolve by key or exact name only, since tree-view IDs such as `C42` and the library root `L1` come from the app.
 
 ## Auditing filing (`zot unfiled`)
 
@@ -459,8 +477,8 @@ To reset the index completely, delete the data directory or run `zot index --for
 
 ## Troubleshooting
 
-- "Could not reach Zotero. Is it running?" means the Zotero desktop app is not open or the local API is disabled.
-  Open Zotero and enable the setting under *Settings → Advanced*.
+- "Could not reach Zotero. Is it running?" means the Zotero desktop app is not open or the local API is disabled, and no web API key is configured to fall back on.
+  Open Zotero and enable the setting under *Settings → Advanced*, or run `zot config set-key`.
 - Search that returns nothing or looks stale usually means a stale index: run `zot index` to sync, or `zot index --force` for a clean rebuild.
 
 ## License

@@ -6,6 +6,9 @@ Notable changes per release. Dates are release dates.
 
 ### Added
 
+- Every command works without the Zotero desktop app: when the local API does not answer and a web API key is configured, reads go to api.zotero.org instead, with one note on stderr. `ZOT_BACKEND=auto|local|web` overrides the choice.
+- `zot pdf` and `zot index` find attachment files without the app: the copy in the Zotero data directory when its MD5 matches, else a download cached under `<cache>/zot/attachments/`.
+- `zot add` without the app creates the item through the web API from the resolved BibTeX, with every collection and tag in one request, and uploads the PDF. A PDF without an identifier is matched by the DOI or arXiv ID on its first page.
 - `zot tags --automatic` and `--unused` list the tags Zotero imported itself and the tags on no items, with use counts.
 - `zot tags --check` flags every tag outside the controlled vocabulary, including tags that only restate the item type or an identifier field, and every item that breaks a facet's cardinality (two states, two `kind:`). The vocabulary is a list of facets, bare or prefixed, each with its values and cardinality, read from `vocabulary` in the config file; a default ships so the check works unconfigured.
 - `zot tags --purge-automatic` deletes every automatic tag library-wide, 50 per request, and says how to stop Zotero re-importing them. A name that is automatic on some items and manual on others is kept and reported, since the API deletes a tag by name from every item at once.
@@ -13,6 +16,7 @@ Notable changes per release. Dates are release dates.
 
 ### Fixed
 
+- Tag listing no longer stops early on the web API, whose `Total-Results` counts distinct tag names rather than the rows it pages over.
 - Tag type is read from `meta.type`, where the API actually puts it on `/tags`, so automatic tags are no longer indistinguishable from manual ones.
 - `zot tags --rename` checks its item list against api.zotero.org before asking, and sweeps the old tag only once the server agrees nothing carries it, so an item tagged on another device cannot be silently stripped instead of renamed.
 - `--contains` is rejected with `--purge-automatic` and `--rename` instead of being silently ignored by them.
