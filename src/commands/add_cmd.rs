@@ -10,6 +10,14 @@
 //!
 //! New items are detected by diffing top-level item versions before/after,
 //! which works uniformly for both paths.
+//!
+//! With the desktop app closed there is no connector, so [`run_add_web`]
+//! creates the item through the web API instead: BibTeX is converted to
+//! Zotero JSON here (`api::bibtex`), collections and tags go on the item in
+//! the same write, and a PDF is uploaded as a child attachment. A PDF without
+//! an identifier has no recognizer to run, so its first page is searched for a
+//! DOI or arXiv ID; failing that it is saved as a standalone attachment, as
+//! the connector does when recognition fails.
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -17,6 +25,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::api::connector::SaveTarget;
+use crate::api::bibtex;
 use crate::api::resolve::{self, Identifier};
 use crate::api::{ConnectorClient, SearchParams, VersionConflict, WebApiClient, ZoteroClient};
 use crate::collections::{CollectionNode, CollectionRef, build_tree, resolve_collection_ref};
@@ -48,7 +57,6 @@ pub fn run_add(args: AddArgs) -> Result<()> {
     }
 
     let local = ZoteroClient::new()?;
-    let connector = ConnectorClient::new()?;
 
     // Parse identifier + duplicate guard.
     let identifier = args
@@ -79,6 +87,11 @@ pub fn run_add(args: AddArgs) -> Result<()> {
             Ok((bytes, filename))
         })
         .transpose()?;
+
+    if local.is_web() {
+        return run_add_web(&args, &local, identifier, pdf);
+    }
+    let connector = ConnectorClient::new()?;
 
     // Resolve every collection before writing anything, so a typo in the
     // second value fails before the item exists.
@@ -266,6 +279,262 @@ pub fn run_add(args: AddArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `zot add` with the desktop app closed: every write goes to api.zotero.org.
+///
+/// The item is created with its collections and tags in one POST, so nothing
+/// waits for a sync and there is no partial filing to report. Collections
+/// resolve by key or name only, since tree-view IDs (`C42`) come from the
+/// connector.
+fn run_add_web(
+    args: &AddArgs,
+    local: &ZoteroClient,
+    mut identifier: Option<Identifier>,
+    pdf: Option<(Vec<u8>, String)>,
+) -> Result<()> {
+    let web = WebApiClient::from_config()?;
+    let mut warnings: Vec<String> = Vec::new();
+
+    let refs = if args.collections.is_empty() {
+        Vec::new()
+    } else {
+        let nodes = build_tree(&local.fetch_collections()?);
+        let mut refs: Vec<CollectionRef> = Vec::new();
+        for input in &args.collections {
+            let resolved = resolve_collection_ref(input, &nodes, &[]).with_context(|| {
+                format!(
+                    "--collection {input}: with the Zotero app closed, collections resolve by \
+                     key or exact name only (tree-view IDs such as C42 come from the app)."
+                )
+            })?;
+            if resolved.key.is_none() {
+                bail!(
+                    "--collection {input}: no collection key for \"{}\"; pass its key or name.",
+                    resolved.name
+                );
+            }
+            if let Some(dup) = refs.iter().find(|r| same_collection(r, &resolved)) {
+                bail!(
+                    "--collection {input} names the same collection as an earlier value: {}.",
+                    render(dup),
+                );
+            }
+            refs.push(resolved);
+        }
+        refs
+    };
+    let collection_keys: Vec<String> = refs.iter().filter_map(|r| r.key.clone()).collect();
+    let tags: Vec<Value> = args.tags.iter().map(|t| json!({ "tag": t })).collect();
+
+    // No identifier, but a PDF: read one off its first page, the closest
+    // thing to the desktop app's recognizer available here.
+    if identifier.is_none() {
+        if let Some(path) = args.pdf {
+            if let Some(found) = identifier_from_pdf(Path::new(path)) {
+                eprintln!("Found {} in the PDF.", found.display());
+                if !args.force {
+                    check_duplicates(local, &found)?;
+                }
+                warnings.push(format!(
+                    "Metadata was resolved from {}, read off the PDF's first page; verify it \
+                     matches the file.",
+                    found.display()
+                ));
+                identifier = Some(found);
+            }
+        }
+    }
+
+    let mut added: Vec<AddedItemOutput> = Vec::new();
+    let mut parent_key: Option<String> = None;
+    if let Some(id) = &identifier {
+        let bibtex = resolve::fetch_bibtex(id)?;
+        eprintln!(
+            "Resolved {} -> creating the item through the Zotero web API...",
+            id.display()
+        );
+        let mut item = bibtex::bibtex_to_zotero(&bibtex)?;
+        let item_type = item["itemType"].as_str().unwrap_or("document").to_string();
+        let template = web.item_template(&item_type)?;
+        item = bibtex::fit_to_template(item, &template)?;
+        item["collections"] = json!(collection_keys);
+        item["tags"] = Value::Array(tags.clone());
+        let key = web.create_item(&item)?;
+        let creators = item["creators"]
+            .as_array()
+            .map(|cs| {
+                cs.iter()
+                    .map(|c| {
+                        c.get("lastName")
+                            .or_else(|| c.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        added.push(AddedItemOutput {
+            key: key.clone(),
+            title: item["title"].as_str().unwrap_or_default().to_string(),
+            item_type,
+            creators,
+            date: item["date"].as_str().unwrap_or_default().to_string(),
+            doi: item["DOI"].as_str().unwrap_or_default().to_string(),
+        });
+        parent_key = Some(key);
+    }
+
+    if let (Some((bytes, filename)), Some(path)) = (&pdf, args.pdf) {
+        let mut attachment = json!({
+            "itemType": "attachment",
+            "linkMode": "imported_file",
+            "title": if parent_key.is_some() { "Full Text PDF" } else { filename.as_str() },
+            "contentType": "application/pdf",
+            "filename": filename,
+            "tags": [],
+        });
+        match &parent_key {
+            Some(key) => attachment["parentItem"] = json!(key),
+            None => {
+                // A standalone attachment carries the filing itself.
+                attachment["collections"] = json!(collection_keys);
+                attachment["tags"] = Value::Array(tags.clone());
+                warnings.push(
+                    "No DOI or arXiv ID found on the PDF's first page, and the Zotero app is \
+                     closed, so there is no recognizer to create the parent item; the PDF was \
+                     saved as a standalone attachment. Re-run with the identifier to create \
+                     the item."
+                        .to_string(),
+                );
+            }
+        }
+        let attachment_key = web.create_item(&attachment)?;
+        eprintln!("Uploading {filename} ({} KB)...", bytes.len() / 1024);
+        web.upload_attachment_file(&attachment_key, Path::new(path))?;
+        // Seed the download cache with the bytes just uploaded, so the index
+        // update below does not fetch them straight back.
+        if let Some(cached) = crate::api::client::attachment_cache_path(&attachment_key, filename) {
+            if let Some(dir) = cached.parent() {
+                let _ = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&cached, bytes));
+            }
+        }
+        if parent_key.is_none() {
+            added.push(AddedItemOutput {
+                key: attachment_key,
+                title: filename.clone(),
+                item_type: "attachment".to_string(),
+                creators: String::new(),
+                date: String::new(),
+                doi: String::new(),
+            });
+        }
+    }
+
+    if let Some(warning) = unfiled_warning(&args.collections, args.no_collection, &added) {
+        eprintln!("{warning}");
+    }
+    let collections = if refs.is_empty() {
+        None
+    } else {
+        Some(AddCollectionsOutput {
+            filed: refs.iter().map(render).collect(),
+            pending: Vec::new(),
+            fix_command: None,
+        })
+    };
+    let output = AddOutput {
+        added,
+        collections,
+        warnings,
+    };
+    println!("{}", format_output(&output, args.json));
+
+    if !args.no_index {
+        eprintln!("\nUpdating search index...");
+        if let Err(e) = super::index_cmd::run_index(false, args.json) {
+            eprintln!("Warning: index update failed: {e:#}\n  Run `zot index` manually.");
+        }
+    }
+    Ok(())
+}
+
+/// The paper's own identifier from the first page of a PDF: a DOI, else an
+/// arXiv ID. Only the opening text is searched, since the reference list is
+/// full of other papers' DOIs.
+fn identifier_from_pdf(path: &Path) -> Option<Identifier> {
+    let outcome = crate::index::pdf::extract_text(path).ok()?;
+    let head: String = outcome.text.chars().take(4000).collect();
+    find_doi(&head)
+        .and_then(|d| resolve::parse_identifier(&d).ok())
+        .or_else(|| find_arxiv(&head).and_then(|a| resolve::parse_identifier(&a).ok()))
+}
+
+/// First `10.NNNN/suffix` in `text`, trailing punctuation trimmed.
+fn find_doi(text: &str) -> Option<String> {
+    let tokens = text.split(|c: char| c.is_whitespace() || c == '"' || c == '<' || c == '>');
+    for token in tokens {
+        for (start, _) in token.match_indices("10.") {
+            let before = token.get(..start).and_then(|b| b.chars().next_back());
+            if before.is_some_and(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let Some(candidate) = token.get(start..) else {
+                continue;
+            };
+            let Some((registrant, suffix)) = candidate
+                .strip_prefix("10.")
+                .and_then(|r| r.split_once('/'))
+            else {
+                continue;
+            };
+            let registrant_ok = (4..=9).contains(&registrant.len())
+                && registrant.chars().all(|c| c.is_ascii_digit());
+            let suffix = suffix.trim_end_matches(['.', ',', ';', ')', ']']);
+            if registrant_ok && !suffix.is_empty() {
+                return Some(format!("10.{registrant}/{suffix}"));
+            }
+        }
+    }
+    None
+}
+
+/// First `arXiv:NNNN.NNNNN` in `text`.
+fn find_arxiv(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let pos = lower.find("arxiv:")?;
+    let id: String = text
+        .get(pos + 6..)?
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '/' || *c == '-')
+        .collect();
+    (!id.is_empty()).then(|| format!("arXiv:{id}"))
+}
+
+#[cfg(test)]
+mod identifier_scan_tests {
+    use super::{find_arxiv, find_doi};
+
+    #[test]
+    fn the_first_doi_is_found_and_trailing_punctuation_dropped() {
+        let text = "Automation in Construction 150 (2023) 104812. https://doi.org/10.1016/j.autcon.2023.104812. Received 3 May";
+        assert_eq!(find_doi(text).as_deref(), Some("10.1016/j.autcon.2023.104812"));
+    }
+
+    #[test]
+    fn version_numbers_and_short_prefixes_are_not_dois() {
+        assert_eq!(find_doi("IFC 4.3 and v2.10.1/x and 10.12/abc"), None);
+        assert_eq!(find_doi("see 210.1234/abc"), None);
+    }
+
+    #[test]
+    fn an_arxiv_stamp_is_found() {
+        let text = "arXiv:2401.12345v2 [cs.CL] 3 Feb 2024";
+        assert_eq!(find_arxiv(text).as_deref(), Some("arXiv:2401.12345v2"));
+    }
 }
 
 /// An attachment or note with no parent of its own: `zot unfiled` calls it a

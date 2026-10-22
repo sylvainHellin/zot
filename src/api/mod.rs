@@ -1,3 +1,4 @@
+pub mod bibtex;
 pub mod client;
 pub mod connector;
 pub mod models;

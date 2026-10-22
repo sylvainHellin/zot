@@ -1,13 +1,14 @@
-//! Client for the Zotero **web API** (api.zotero.org) — used only by write
-//! commands that the local API cannot serve (`edit`, `attach`, `rm`).
+//! Client for the Zotero **web API** (api.zotero.org).
 //!
-//! Reads remain 100% local. Writes here sync back to the desktop app via
-//! Zotero sync (typically within seconds when auto-sync is on).
+//! Every write goes through here, because the local API is read-only; writes
+//! sync back to the desktop app via Zotero sync (typically within seconds when
+//! auto-sync is on). Reads go to the local API while the desktop app runs, and
+//! fall back to this client when it does not (see `ZoteroClient::new`).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use md5::{Digest, Md5};
 use reqwest::blocking::Client;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::config::Config;
 
@@ -61,6 +62,14 @@ impl std::fmt::Display for VersionConflict {
 impl std::error::Error for VersionConflict {}
 
 impl WebApiClient {
+    /// Whether a key is available at all (env or config), so a caller can
+    /// decide on a fallback without turning "no key" into an error.
+    pub fn is_configured() -> bool {
+        Config::load()
+            .map(|cfg| cfg.resolve_api_key().is_some())
+            .unwrap_or(false)
+    }
+
     /// Build a client from stored config (`zot config set-key`), resolving and
     /// caching the numeric user ID on first use.
     pub fn from_config() -> Result<Self> {
@@ -118,6 +127,53 @@ impl WebApiClient {
         })
     }
 
+    /// Root of the user library on api.zotero.org, the web counterpart of the
+    /// local API's `http://localhost:23119/api/users/0`. Every read path below
+    /// it is the same on both, which is what lets `ZoteroClient` swap one for
+    /// the other.
+    pub fn library_base(&self) -> String {
+        format!("{WEB_API_BASE}/users/{}", self.user_id)
+    }
+
+    /// Authenticated GET of an absolute URL, honouring throttling like every
+    /// other request here.
+    pub fn get_url(&self, url: &str) -> Result<reqwest::blocking::Response> {
+        self.send_retrying(|| self.auth(self.client.get(url)))
+    }
+
+    /// Download an attachment's file into `dest`, returning `false` when the
+    /// server holds no file for it (404: never uploaded, or stored on WebDAV).
+    ///
+    /// `/file/view` rather than `/file`: for a web snapshot `/file` returns the
+    /// ZIP Zotero stores, `/file/view` the main file unpacked, and for any
+    /// other attachment both return the same bytes. The body is written to a
+    /// sibling temp file and renamed, so an interrupted download never leaves
+    /// a truncated file under the final name.
+    pub fn download_attachment(&self, key: &str, dest: &std::path::Path) -> Result<bool> {
+        let url = self.items_url(&format!("/{key}/file/view"));
+        let resp = self.get_url(&url)?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !status.is_success() {
+            bail!("Web API returned {status} downloading the file of {key}");
+        }
+        let bytes = resp
+            .bytes()
+            .with_context(|| format!("Failed to read the file of {key}"))?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        let tmp = dest.with_extension("part");
+        std::fs::write(&tmp, &bytes)
+            .with_context(|| format!("Failed to write {}", tmp.display()))?;
+        std::fs::rename(&tmp, dest)
+            .with_context(|| format!("Failed to move the download to {}", dest.display()))?;
+        Ok(true)
+    }
+
     fn items_url(&self, suffix: &str) -> String {
         format!("{WEB_API_BASE}/users/{}/items{}", self.user_id, suffix)
     }
@@ -159,9 +215,7 @@ impl WebApiClient {
                     .or_else(|| header_secs(resp.headers(), "Backoff"))
                     .unwrap_or(1 << attempt)
                     .min(MAX_WAIT_SECS);
-                eprintln!(
-                    "api.zotero.org returned {status}; waiting {wait}s before retrying..."
-                );
+                eprintln!("api.zotero.org returned {status}; waiting {wait}s before retrying...");
                 std::thread::sleep(std::time::Duration::from_secs(wait));
                 attempt += 1;
                 continue;
@@ -242,8 +296,10 @@ impl WebApiClient {
         }
         let url = self.tags_url(&format!("?tag={}", encode_tag_list(tags)));
         let resp = self.send_retrying(|| {
-            self.auth(self.client.delete(&url))
-                .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
+            self.auth(self.client.delete(&url)).header(
+                "If-Unmodified-Since-Version",
+                if_unmodified_version.to_string(),
+            )
         })?;
         let status = resp.status();
         if status.is_success() {
@@ -261,7 +317,10 @@ impl WebApiClient {
             .into());
         }
         let body = resp.text().unwrap_or_default();
-        bail!("Web API tag DELETE failed (status {status}): {}", body.trim());
+        bail!(
+            "Web API tag DELETE failed (status {status}): {}",
+            body.trim()
+        );
     }
 
     /// Fetch an item's current server-side JSON, distinguishing "not there"
@@ -311,7 +370,10 @@ impl WebApiClient {
         let body = data.to_string();
         let resp = self.send_retrying(|| {
             self.auth(self.client.patch(&url))
-                .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
+                .header(
+                    "If-Unmodified-Since-Version",
+                    if_unmodified_version.to_string(),
+                )
                 .header("Content-Type", "application/json")
                 .body(body.clone())
         })?;
@@ -336,6 +398,32 @@ impl WebApiClient {
         bail!("Web API PATCH failed (status {status}): {}", body.trim());
     }
 
+    /// The empty item of `item_type`, listing every field that type carries
+    /// (`GET /items/new`, no library or key needed).
+    pub fn item_template(&self, item_type: &str) -> Result<Value> {
+        let url = format!(
+            "{WEB_API_BASE}/items/new?itemType={}",
+            urlencoding::encode(item_type)
+        );
+        let resp = self.get_url(&url)?;
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            bail!("Web API has no template for item type {item_type} ({status}): {}", body.trim());
+        }
+        serde_json::from_str(&body).context("Failed to parse the item template")
+    }
+
+    /// Create one item and return its key.
+    pub fn create_item(&self, item: &Value) -> Result<String> {
+        let resp = self.create_items(&Value::Array(vec![item.clone()]))?;
+        resp.pointer("/successful/0/key")
+            .or_else(|| resp.pointer("/success/0"))
+            .and_then(Value::as_str)
+            .map(String::from)
+            .context("No item key in the creation response")
+    }
+
     /// Create items (POST). Returns the response JSON (`successful` map etc.).
     pub fn create_items(&self, items: &Value) -> Result<Value> {
         let url = self.items_url("");
@@ -348,13 +436,19 @@ impl WebApiClient {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         if !status.is_success() {
-            bail!("Web API item creation failed (status {status}): {}", body.trim());
+            bail!(
+                "Web API item creation failed (status {status}): {}",
+                body.trim()
+            );
         }
         let v: Value = serde_json::from_str(&body).context("Failed to parse creation response")?;
         // Per-item failures come back inside a 200 response.
         if let Some(failed) = v.get("failed").and_then(|f| f.as_object()) {
             if !failed.is_empty() {
-                bail!("Web API rejected item(s): {}", serde_json::to_string(failed)?);
+                bail!(
+                    "Web API rejected item(s): {}",
+                    serde_json::to_string(failed)?
+                );
             }
         }
         Ok(v)
@@ -409,7 +503,10 @@ impl WebApiClient {
             );
         }
         if !resp.status().is_success() {
-            bail!("Web API returned {} fetching collection {key}", resp.status());
+            bail!(
+                "Web API returned {} fetching collection {key}",
+                resp.status()
+            );
         }
         resp.json().context("Failed to parse collection JSON")
     }
@@ -433,7 +530,10 @@ impl WebApiClient {
     pub fn delete_collection(&self, key: &str, if_unmodified_version: u64) -> Result<()> {
         let resp = self
             .auth(self.client.delete(self.collections_url(&format!("/{key}"))))
-            .header("If-Unmodified-Since-Version", if_unmodified_version.to_string())
+            .header(
+                "If-Unmodified-Since-Version",
+                if_unmodified_version.to_string(),
+            )
             .send()
             .context("Failed to DELETE collection")?;
         let status = resp.status();
@@ -453,9 +553,13 @@ impl WebApiClient {
 
     /// Upload a file for an existing attachment item (Zotero 3-step flow:
     /// authorize -> upload -> register).
-    pub fn upload_attachment_file(&self, attachment_key: &str, path: &std::path::Path) -> Result<()> {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+    pub fn upload_attachment_file(
+        &self,
+        attachment_key: &str,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
         let filename = path
             .file_name()
             .and_then(|f| f.to_str())
@@ -487,7 +591,10 @@ impl WebApiClient {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         if !status.is_success() {
-            bail!("Upload authorization failed (status {status}): {}", body.trim());
+            bail!(
+                "Upload authorization failed (status {status}): {}",
+                body.trim()
+            );
         }
         let auth: Value = serde_json::from_str(&body).context("Failed to parse upload auth")?;
         if auth.get("exists").and_then(|e| e.as_u64()) == Some(1) {
@@ -669,7 +776,10 @@ mod tests {
         });
         let err = created_collection_key(&resp).unwrap_err().to_string();
         assert!(err.contains("409"), "{err}");
-        assert!(err.contains("Parent collection ZZZZZZZZ not found"), "{err}");
+        assert!(
+            err.contains("Parent collection ZZZZZZZZ not found"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -682,6 +792,9 @@ mod tests {
     fn created_collection_key_rejects_a_body_reporting_nothing() {
         let resp = json!({ "successful": {}, "success": {}, "failed": {} });
         let err = created_collection_key(&resp).unwrap_err().to_string();
-        assert!(err.contains("neither a created collection nor a failure"), "{err}");
+        assert!(
+            err.contains("neither a created collection nor a failure"),
+            "{err}"
+        );
     }
 }

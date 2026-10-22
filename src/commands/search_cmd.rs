@@ -4,7 +4,9 @@ use std::str::FromStr;
 
 use crate::api::ZoteroClient;
 use crate::commands::export_cmd;
-use crate::index::{BgeSmallEmbedder, BgeRerankerBase, IndexStore, SearchFilters, compute_sync_diff};
+use crate::index::{
+    compute_sync_diff, BgeRerankerBase, BgeSmallEmbedder, IndexStore, SearchFilters,
+};
 use crate::output::{format_output, SearchOutput, SearchResultOutput};
 use crate::search::hybrid_search;
 
@@ -77,7 +79,9 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
     let results = hybrid_search(
         &store,
         &mut embedder,
-        reranker_instance.as_mut().map(|r| r as &mut dyn crate::index::Reranker),
+        reranker_instance
+            .as_mut()
+            .map(|r| r as &mut dyn crate::index::Reranker),
         query,
         &filters,
         limit,
@@ -131,7 +135,7 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
 /// turned into a note saying freshness could not be verified, never an error --
 /// search must keep working from the local index alone.
 fn sync_note(store: &IndexStore) -> Option<String> {
-    let client = match ZoteroClient::new() {
+    let client = match ZoteroClient::new_quiet() {
         Ok(c) => c,
         Err(_) => {
             return Some(
