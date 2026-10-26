@@ -239,7 +239,7 @@ Behavior worth knowing:
   The warning is stderr only, so `--json` stdout stays a single document, where the same fact reads as `collections: null`; that key is always serialised, so a strict consumer can test it.
 - Index refresh: after a successful add, the search index updates incrementally so the paper is immediately findable via `zot search`.
 - No local delete: the connector API cannot remove items, so a mistaken add must be undone with `zot rm` (web API) or in the Zotero UI.
-- Adding by plain URL is on the roadmap, see `BACKLOG.md`; it needs Zotero's web translators, which the connector API does not expose.
+- Adding by plain URL is on the roadmap as Plane issue PERSO-196; it needs Zotero's web translators, which the connector API does not expose.
 - With the desktop app closed, `zot add` creates the item through the web API instead (see the next section).
 
 ## Without the desktop app
@@ -480,6 +480,11 @@ To reset the index completely, delete the data directory or run `zot index --for
 - "Could not reach Zotero. Is it running?" means the Zotero desktop app is not open or the local API is disabled, and no web API key is configured to fall back on.
   Open Zotero and enable the setting under *Settings → Advanced*, or run `zot config set-key`.
 - Search that returns nothing or looks stale usually means a stale index: run `zot index` to sync, or `zot index --force` for a clean rebuild.
+
+## Open work
+
+Open work (bugs, features, background notes) is tracked in Sylvain's self-hosted Plane, project Personal (`PERSO`), module Technical Leverage, with issue titles prefixed `zot:`.
+Commit messages cite the Plane identifier, for example PERSO-196.
 
 ## License
 

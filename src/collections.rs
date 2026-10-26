@@ -44,9 +44,8 @@ pub struct CollectionNode {
     pub count_tree: usize,
     /// `meta.numItems` as reported by the API, for cross-checking
     /// `count_direct` against Zotero's own tally.
-    // Read only by the unit tests so far; the cross-check itself belongs to
-    // BACKLOG "zot collections -- list the collection tree", which records
-    // these two as the free per-collection tally.
+    // Read only by the unit tests so far; these two are the free
+    // per-collection tally the cross-check would compare against.
     #[allow(dead_code)]
     pub meta_num_items: u32,
     /// `meta.numCollections` as reported by the API, i.e. the number of direct
