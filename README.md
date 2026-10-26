@@ -461,6 +461,16 @@ The sweep itself runs only when the server agrees no item still carries the old 
 `--force` skips the prompt for scripts.
 Without it, a non-interactive stdin is refused rather than prompted, and the refusal names what would have been removed.
 
+## Zotero API constraints behind collection writes
+
+Established by probing a live Zotero 7 instance on 2026-09-16; re-probe before relying on them for new write work.
+
+- The local API is read-only: `PATCH http://localhost:23119/api/users/0/items/<key>` returns 501, so there is no local write path.
+- The debug bridge (`/debug-bridge/execute`) returns 404 unless an opt-in pref is set, so there is no local JavaScript escape hatch for triggering a sync or editing collections.
+- The connector's `POST /connector/updateSession` retargets a save session to one collection (`L1` for My Library, `C<n>` as listed by `POST /connector/getSelectedCollection`) plus a tags string; it does not add membership, so it cannot file an item into several collections.
+- Multi-collection membership therefore goes through the web API: `PATCH /users/<id>/items/<key>` with the complete `collections` array, which replaces the item's membership wholesale rather than merging.
+- Web to local sync is prompt (a web patch showed up in the local library at the same version immediately), but local to web is not: an item just created through the desktop app does not exist on api.zotero.org until Zotero syncs, so any web patch right after a local add needs a bounded poll, not a single attempt.
+
 ## Where data lives
 
 The local index is stored in the platform data directory, `~/Library/Application Support/zot/` on macOS and `~/.local/share/zot/` on Linux:
@@ -483,7 +493,7 @@ To reset the index completely, delete the data directory or run `zot index --for
 
 ## Open work
 
-Open work (bugs, features, background notes) is tracked in Sylvain's self-hosted Plane, project Personal (`PERSO`), module Technical Leverage, with issue titles prefixed `zot:`.
+Open work (bugs and features) is tracked in Sylvain's self-hosted Plane, project Personal (`PERSO`), module Technical Leverage, with issue titles prefixed `zot:`.
 Commit messages cite the Plane identifier, for example PERSO-196.
 
 ## License
