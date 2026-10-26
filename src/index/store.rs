@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -226,11 +226,15 @@ impl IndexStore {
     /// an older version without atomic writes) can always be rebuilt.
     pub fn recreate(model_name: &str, model_dim: usize) -> Result<Self> {
         let base_dir = Self::data_dir()?;
-        for file in ["vectors.bin", "vectors.bin.tmp", "meta.json", "meta.json.tmp"] {
+        for file in [
+            "vectors.bin",
+            "vectors.bin.tmp",
+            "meta.json",
+            "meta.json.tmp",
+        ] {
             let p = base_dir.join(file);
             if p.exists() {
-                fs::remove_file(&p)
-                    .with_context(|| format!("Failed to remove {}", p.display()))?;
+                fs::remove_file(&p).with_context(|| format!("Failed to remove {}", p.display()))?;
             }
         }
         let tantivy_dir = base_dir.join("tantivy");
@@ -247,15 +251,13 @@ impl IndexStore {
         let vectors_path = base_dir.join("vectors.bin");
         let meta_path = base_dir.join("meta.json");
 
-        fs::create_dir_all(&tantivy_dir)
-            .context("Failed to create index directory")?;
+        fs::create_dir_all(&tantivy_dir).context("Failed to create index directory")?;
 
         let (schema, fields) = build_schema();
 
         // Try to open existing index, or create new
         let index = if tantivy_dir.join("meta.json").exists() {
-            Index::open_in_dir(&tantivy_dir)
-                .context("Failed to open existing tantivy index")?
+            Index::open_in_dir(&tantivy_dir).context("Failed to open existing tantivy index")?
         } else {
             Index::create_in_dir(&tantivy_dir, schema.clone())
                 .context("Failed to create tantivy index")?
@@ -663,10 +665,7 @@ impl IndexStore {
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
             let doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
-            if let Some(chunk_id) = doc
-                .get_first(self.fields.chunk_id)
-                .and_then(|v| v.as_str())
-            {
+            if let Some(chunk_id) = doc.get_first(self.fields.chunk_id).and_then(|v| v.as_str()) {
                 results.push((chunk_id.to_string(), score));
             }
         }
@@ -691,10 +690,7 @@ impl IndexStore {
             let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
 
             // Match all, then filter
-            clauses.push((
-                Occur::Must,
-                Box::new(tantivy::query::AllQuery),
-            ));
+            clauses.push((Occur::Must, Box::new(tantivy::query::AllQuery)));
 
             if let Some(tag) = &filters.tag {
                 clauses.push((
@@ -725,18 +721,13 @@ impl IndexStore {
             }
 
             let filter_query = BooleanQuery::new(clauses);
-            let top_docs = searcher.search(
-                &filter_query,
-                &TopDocs::with_limit(self.chunk_ids.len()),
-            )?;
+            let top_docs =
+                searcher.search(&filter_query, &TopDocs::with_limit(self.chunk_ids.len()))?;
 
             let mut allowed = std::collections::HashSet::new();
             for (_, doc_address) in top_docs {
                 let doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
-                if let Some(cid) = doc
-                    .get_first(self.fields.chunk_id)
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(cid) = doc.get_first(self.fields.chunk_id).and_then(|v| v.as_str()) {
                     allowed.insert(cid.to_string());
                 }
             }
@@ -864,7 +855,8 @@ impl IndexStore {
             Term::from_field_text(self.fields.chunk_type, "metadata"),
             IndexRecordOption::Basic,
         );
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(self.chunk_ids.len().max(1)))?;
+        let top_docs =
+            searcher.search(&query, &TopDocs::with_limit(self.chunk_ids.len().max(1)))?;
 
         let mut count = 0;
         for (_, doc_address) in top_docs {
@@ -1037,11 +1029,8 @@ fn doc_to_chunk_data(doc: &tantivy::TantivyDocument, fields: &Fields) -> ChunkDa
             .unwrap_or("")
             .to_string()
     };
-    let get_u64 = |field: Field| -> u64 {
-        doc.get_first(field)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0)
-    };
+    let get_u64 =
+        |field: Field| -> u64 { doc.get_first(field).and_then(|v| v.as_u64()).unwrap_or(0) };
 
     ChunkData {
         chunk_id: get_text(fields.chunk_id),
@@ -1097,12 +1086,7 @@ fn chunk_belongs_to(chunk_id: &str, key: &str) -> bool {
 /// Written to a `.tmp` sibling and atomically renamed into place, so a crash
 /// or SIGKILL mid-write can never leave a truncated `vectors.bin` behind
 /// (which would make the store unopenable).
-fn save_vectors(
-    path: &Path,
-    vectors: &[Vec<f32>],
-    chunk_ids: &[String],
-    dim: usize,
-) -> Result<()> {
+fn save_vectors(path: &Path, vectors: &[Vec<f32>], chunk_ids: &[String], dim: usize) -> Result<()> {
     use std::io::Write;
     let tmp_path = path.with_extension("bin.tmp");
     let mut file = fs::File::create(&tmp_path)?;
@@ -1144,9 +1128,7 @@ fn load_vectors(path: &Path, expected_dim: usize) -> Result<(Vec<Vec<f32>>, Vec<
     let dim = u32::from_le_bytes(buf4) as usize;
 
     if dim != expected_dim {
-        bail!(
-            "Vector dimension mismatch: file has {dim}, expected {expected_dim}"
-        );
+        bail!("Vector dimension mismatch: file has {dim}, expected {expected_dim}");
     }
 
     // Read chunk IDs
@@ -1240,7 +1222,7 @@ mod tests {
         remote.insert("SAME".to_string(), 3u64); // unchanged
         remote.insert("CHANGED".to_string(), 4u64); // version bumped
         remote.insert("NEW".to_string(), 1u64); // new remotely
-        // GONE absent remotely -> removed.
+                                                // GONE absent remotely -> removed.
 
         let diff = compute_sync_diff(&remote, &local);
 
@@ -1311,7 +1293,7 @@ mod tests {
         remote.insert("OLD_PRESENT".to_string(), 5); // unchanged, still remote
         remote.insert("NEW_OK".to_string(), 10); // indexed this run
         remote.insert("NEW_FAILED".to_string(), 11); // queued but zero chunks, must retry
-        // OLD_DELETED absent from remote -> dropped.
+                                                     // OLD_DELETED absent from remote -> dropped.
 
         let mut indexed = HashMap::new();
         indexed.insert("NEW_OK".to_string(), 10);
@@ -1321,8 +1303,14 @@ mod tests {
         let items = &store.meta.items;
         assert_eq!(items.get("OLD_PRESENT"), Some(&5));
         assert_eq!(items.get("NEW_OK"), Some(&10));
-        assert!(!items.contains_key("NEW_FAILED"), "failed item must be retried");
-        assert!(!items.contains_key("OLD_DELETED"), "deleted item must be dropped");
+        assert!(
+            !items.contains_key("NEW_FAILED"),
+            "failed item must be retried"
+        );
+        assert!(
+            !items.contains_key("OLD_DELETED"),
+            "deleted item must be dropped"
+        );
         assert_eq!(items.len(), 2);
 
         fs::remove_dir_all(&dir).ok();
@@ -1388,17 +1376,34 @@ mod tests {
             .collect();
         let writer = store.open_writer().unwrap();
         store
-            .add_item(&writer, &indexable(key_short), &chunks_short, &emb_short, "")
+            .add_item(
+                &writer,
+                &indexable(key_short),
+                &chunks_short,
+                &emb_short,
+                "",
+            )
             .unwrap();
         store.commit_writer(writer).unwrap();
 
         // ABCD's 3 vectors survive + ABC's 2 vectors are added = 5 total.
         // Pre-fix this would have been 2 (only ABC's after the bad purge).
         assert_eq!(store.vector_count(), 5);
-        let abcd_count = store.chunk_ids.iter().filter(|c| c.starts_with("ABCD")).count();
-        let abc_count = store.chunk_ids.iter().filter(|c| c.starts_with("ABC")).count();
+        let abcd_count = store
+            .chunk_ids
+            .iter()
+            .filter(|c| c.starts_with("ABCD"))
+            .count();
+        let abc_count = store
+            .chunk_ids
+            .iter()
+            .filter(|c| c.starts_with("ABC"))
+            .count();
         assert_eq!(abcd_count, 3, "ABCD's vectors must not be purged by ABC");
-        assert_eq!(abc_count, 5, "ABC's chunks (3 ABCD + 2 ABC) all start with ABC");
+        assert_eq!(
+            abc_count, 5,
+            "ABC's chunks (3 ABCD + 2 ABC) all start with ABC"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1478,9 +1483,7 @@ mod tests {
         // Add two items with prefix-sharing keys (meta + 1 fulltext = 2 each).
         for key in ["ABCD", "ABC"] {
             let chunks = make_chunks(key, 1);
-            let emb: Vec<Vec<f32>> = (0..chunks.len())
-                .map(|_| vec![0.1, 0.2, 0.3])
-                .collect();
+            let emb: Vec<Vec<f32>> = (0..chunks.len()).map(|_| vec![0.1, 0.2, 0.3]).collect();
             let writer = store.open_writer().unwrap();
             store
                 .add_item(&writer, &indexable(key), &chunks, &emb, "")

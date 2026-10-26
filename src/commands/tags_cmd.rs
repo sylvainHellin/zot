@@ -6,19 +6,19 @@
 //! `zot collections --rm` pattern: blast radius first, typed confirmation
 //! second, writes last.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
-use crate::api::ZoteroClient;
 use crate::api::client::TagInfo;
 use crate::api::models::ZoteroItem;
-use crate::api::webapi::{TAG_DELETE_BATCH, VersionConflict, WebApiClient};
+use crate::api::webapi::{VersionConflict, WebApiClient, TAG_DELETE_BATCH};
+use crate::api::ZoteroClient;
 use crate::config::{Cardinality, Config, Facet, Vocabulary};
 use crate::output::{
-    FacetMissingOutput, ItemIssueOutput, SharedTagOutput, TagCheckOutput, TagIssueOutput,
-    TagOutput, TagRenamedOutput, TagsOutput, TagsPurgedOutput, format_output,
+    format_output, FacetMissingOutput, ItemIssueOutput, SharedTagOutput, TagCheckOutput,
+    TagIssueOutput, TagOutput, TagRenamedOutput, TagsOutput, TagsPurgedOutput,
 };
 
 /// How many tags or items a confirmation summary lists before summarising the
@@ -224,8 +224,7 @@ fn vocabulary_source(cfg: &Config) -> String {
             .unwrap_or_else(|_| "the config file".to_string());
         format!("vocabulary from {path}")
     } else {
-        "built-in default vocabulary; add `vocabulary` to the config file to change it"
-            .to_string()
+        "built-in default vocabulary; add `vocabulary` to the config file to change it".to_string()
     }
 }
 
@@ -332,8 +331,8 @@ fn facet_match<'a>(tag: &str, vocab: &'a Vocabulary) -> FacetMatch<'a> {
             Some(prefix) => {
                 if let Some(rest) = lower.strip_prefix(&prefix.to_lowercase()) {
                     let value = rest.trim();
-                    let allowed = !value.is_empty()
-                        && (facet.is_open() || matches_value(facet, value));
+                    let allowed =
+                        !value.is_empty() && (facet.is_open() || matches_value(facet, value));
                     return FacetMatch::Prefixed { facet, allowed };
                 }
             }
@@ -763,9 +762,7 @@ fn purge_summary(scope: &PurgeScope) -> String {
                 shared.tag, shared.automatic_items, shared.manual_items,
             ));
         }
-        out.push_str(
-            "    Remove those one item at a time: zot edit <key> --rm-tag \"<tag>\"\n",
-        );
+        out.push_str("    Remove those one item at a time: zot edit <key> --rm-tag \"<tag>\"\n");
     }
     out.push_str(
         "  The items are NOT deleted, only these tags come off them.\n  \
@@ -900,7 +897,7 @@ fn rename_note(was_automatic: bool, removed_old_tag: bool, stragglers: u64) -> O
         parts.push(
             "The old tag was automatic; the new one is manual, so Zotero will not re-import \
              it."
-                .to_string(),
+            .to_string(),
         );
     }
     if !removed_old_tag {
@@ -1063,7 +1060,10 @@ fn renamed_tags(
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(current.len());
     let mut seen: Vec<String> = Vec::with_capacity(current.len());
     for entry in current {
-        let name = entry.get("tag").and_then(|s| s.as_str()).unwrap_or_default();
+        let name = entry
+            .get("tag")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default();
         if name.is_empty() {
             continue;
         }
@@ -1160,8 +1160,14 @@ mod tests {
     fn vocabulary_accepts_bare_tags_and_closed_facet_values() {
         let vocab = Vocabulary::default();
         assert_eq!(vocabulary_verdict("to-read", &vocab), VocabVerdict::Allowed);
-        assert_eq!(vocabulary_verdict("method:rag", &vocab), VocabVerdict::Allowed);
-        assert_eq!(vocabulary_verdict("kind:survey", &vocab), VocabVerdict::Allowed);
+        assert_eq!(
+            vocabulary_verdict("method:rag", &vocab),
+            VocabVerdict::Allowed
+        );
+        assert_eq!(
+            vocabulary_verdict("kind:survey", &vocab),
+            VocabVerdict::Allowed
+        );
     }
 
     #[test]
@@ -1386,10 +1392,7 @@ mod tests {
     fn a_bare_facet_value_is_in_the_vocabulary() {
         let vocab = Vocabulary::default();
         assert_eq!(vocabulary_verdict("urgent", &vocab), VocabVerdict::Allowed);
-        assert!(matches!(
-            facet_match("urgent", &vocab),
-            FacetMatch::Bare(_)
-        ));
+        assert!(matches!(facet_match("urgent", &vocab), FacetMatch::Bare(_)));
     }
 
     #[test]
@@ -1403,7 +1406,10 @@ mod tests {
                 cardinality: Cardinality::Any,
             }],
         };
-        assert_eq!(vocabulary_verdict("method:rag", &vocab), VocabVerdict::Allowed);
+        assert_eq!(
+            vocabulary_verdict("method:rag", &vocab),
+            VocabVerdict::Allowed
+        );
         match vocabulary_verdict("method:nope", &vocab) {
             VocabVerdict::UnknownValue { facet, .. } => assert_eq!(facet, "method:"),
             other => panic!("expected UnknownValue, got {other:?}"),

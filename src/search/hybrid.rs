@@ -134,10 +134,7 @@ pub fn hybrid_search(
 }
 
 /// Reciprocal Rank Fusion: merge two ranked lists.
-fn rrf_fusion(
-    list_a: &[(String, f32)],
-    list_b: &[(String, f32)],
-) -> Vec<(String, f32)> {
+fn rrf_fusion(list_a: &[(String, f32)], list_b: &[(String, f32)]) -> Vec<(String, f32)> {
     let mut scores: HashMap<String, f32> = HashMap::new();
 
     for (rank, (id, _)) in list_a.iter().enumerate() {

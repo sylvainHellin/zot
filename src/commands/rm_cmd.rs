@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use crate::api::WebApiClient;
-use crate::output::{RmOutput, format_output};
+use crate::output::{format_output, RmOutput};
 
 pub fn run_rm(keys: &[String], json: bool) -> Result<()> {
     let web = WebApiClient::from_config()?;

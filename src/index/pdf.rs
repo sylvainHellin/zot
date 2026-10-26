@@ -103,8 +103,8 @@ struct WorkerReport {
 /// Returns a structured [`ExtractOutcome`]: the caller decides how to index and
 /// report based on the status.
 pub fn extract_text(path: &Path) -> Result<ExtractOutcome> {
-    let meta = std::fs::metadata(path)
-        .context(format!("Failed to stat PDF: {}", path.display()))?;
+    let meta =
+        std::fs::metadata(path).context(format!("Failed to stat PDF: {}", path.display()))?;
     if meta.len() > MAX_PDF_BYTES {
         return Ok(ExtractOutcome {
             status: ExtractStatus::Failed,
@@ -287,8 +287,7 @@ pub fn run_extract_worker(path: &Path) -> Result<()> {
     // into failed-page entries below.
     panic::set_hook(Box::new(|_| {}));
 
-    let bytes = std::fs::read(path)
-        .context(format!("Failed to read PDF: {}", path.display()))?;
+    let bytes = std::fs::read(path).context(format!("Failed to read PDF: {}", path.display()))?;
 
     let report = extract_report(bytes);
 

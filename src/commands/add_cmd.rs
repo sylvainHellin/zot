@@ -19,17 +19,17 @@
 //! DOI or arXiv ID; failing that it is saved as a standalone attachment, as
 //! the connector does when recognition fails.
 
-use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::api::connector::SaveTarget;
 use crate::api::bibtex;
+use crate::api::connector::SaveTarget;
 use crate::api::resolve::{self, Identifier};
 use crate::api::{ConnectorClient, SearchParams, VersionConflict, WebApiClient, ZoteroClient};
-use crate::collections::{CollectionNode, CollectionRef, build_tree, resolve_collection_ref};
-use crate::output::{AddCollectionsOutput, AddOutput, AddedItemOutput, format_output};
+use crate::collections::{build_tree, resolve_collection_ref, CollectionNode, CollectionRef};
+use crate::output::{format_output, AddCollectionsOutput, AddOutput, AddedItemOutput};
 
 /// How long to wait for a freshly added item to reach api.zotero.org before
 /// giving up on filing the collections after the first. Zotero's auto-sync
@@ -59,10 +59,7 @@ pub fn run_add(args: AddArgs) -> Result<()> {
     let local = ZoteroClient::new()?;
 
     // Parse identifier + duplicate guard.
-    let identifier = args
-        .identifier
-        .map(resolve::parse_identifier)
-        .transpose()?;
+    let identifier = args.identifier.map(resolve::parse_identifier).transpose()?;
     if let Some(id) = &identifier {
         if !args.force {
             check_duplicates(&local, id)?;
@@ -133,8 +130,7 @@ pub fn run_add(args: AddArgs) -> Result<()> {
         // PDF (with optional identifier for dedup/fallback).
         (id_opt, Some((bytes, filename))) => {
             eprintln!("Saving PDF ({} KB) to Zotero...", bytes.len() / 1024);
-            let resp =
-                connector.save_standalone_attachment(bytes.clone(), filename, &session)?;
+            let resp = connector.save_standalone_attachment(bytes.clone(), filename, &session)?;
             let can_recognize = resp
                 .get("canRecognize")
                 .and_then(|v| v.as_bool())
@@ -521,7 +517,10 @@ mod identifier_scan_tests {
     #[test]
     fn the_first_doi_is_found_and_trailing_punctuation_dropped() {
         let text = "Automation in Construction 150 (2023) 104812. https://doi.org/10.1016/j.autcon.2023.104812. Received 3 May";
-        assert_eq!(find_doi(text).as_deref(), Some("10.1016/j.autcon.2023.104812"));
+        assert_eq!(
+            find_doi(text).as_deref(),
+            Some("10.1016/j.autcon.2023.104812")
+        );
     }
 
     #[test]
@@ -975,14 +974,14 @@ fn poll_for_item(web: &WebApiClient, item_key: &str, extra: usize) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedCollections, check_collection_flags, edit_command, isbn_field_matches,
-        unfiled_warning,
+        check_collection_flags, edit_command, isbn_field_matches, unfiled_warning,
+        ResolvedCollections,
     };
     use crate::api::connector::SaveTarget;
     use crate::api::models::ZoteroCollection;
-    use crate::collections::{CollectionNode, build_tree};
+    use crate::collections::{build_tree, CollectionNode};
     use crate::commands::edit_cmd::merge_collections;
-    use crate::output::{AddOutput, AddedItemOutput, format_output};
+    use crate::output::{format_output, AddOutput, AddedItemOutput};
     use serde_json::json;
 
     /// Only the key and the item type decide what the unfiled warning says.
@@ -1054,7 +1053,10 @@ mod tests {
         let err = check_collection_flags(true, &v(&["Alpha", "C3"]))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("--no-collection contradicts --collection"), "{err}");
+        assert!(
+            err.contains("--no-collection contradicts --collection"),
+            "{err}"
+        );
         assert!(err.contains("Alpha --collection C3"), "{err}");
 
         // Either flag on its own is fine, as is neither.
@@ -1077,7 +1079,10 @@ mod tests {
         let text = format_output(&out, true);
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
         assert!(
-            parsed.as_object().expect("object").contains_key("collections"),
+            parsed
+                .as_object()
+                .expect("object")
+                .contains_key("collections"),
             "{text}"
         );
         assert_eq!(parsed["collections"], json!(null));
@@ -1110,7 +1115,10 @@ mod tests {
     fn the_unfiled_warning_names_the_item_rather_than_its_attachment() {
         // A recognized PDF add creates both; the collections, and the warning,
         // belong on the parent item whatever order they come back in.
-        let items = vec![added("SLJFJADB", "attachment"), added("ITEMKEY1", "journalArticle")];
+        let items = vec![
+            added("SLJFJADB", "attachment"),
+            added("ITEMKEY1", "journalArticle"),
+        ];
         let w = unfiled_warning(&[], false, &items).expect("warning");
         assert!(w.contains("[ITEMKEY1] is an unfiled item"), "{w}");
         assert!(!w.contains("SLJFJADB"), "{w}");
@@ -1123,14 +1131,23 @@ mod tests {
         // would contradict the other command about the same key.
         let items = vec![added("SLJFJADB", "attachment")];
         let w = unfiled_warning(&[], false, &items).expect("warning");
-        assert!(w.contains("[SLJFJADB] was saved as a standalone attachment"), "{w}");
-        assert!(w.contains("stray to reparent, not as an item to file"), "{w}");
+        assert!(
+            w.contains("[SLJFJADB] was saved as a standalone attachment"),
+            "{w}"
+        );
+        assert!(
+            w.contains("stray to reparent, not as an item to file"),
+            "{w}"
+        );
         assert!(w.contains("zot attach <item-key> <file>"), "{w}");
         assert!(!w.contains("--add-collection"), "{w}");
 
         let items = vec![added("NOTE0001", "note")];
         let w = unfiled_warning(&[], false, &items).expect("warning");
-        assert!(w.contains("[NOTE0001] was saved as a standalone note"), "{w}");
+        assert!(
+            w.contains("[NOTE0001] was saved as a standalone note"),
+            "{w}"
+        );
         assert!(w.contains("Reparent it in the Zotero UI"), "{w}");
         assert!(!w.contains("--add-collection"), "{w}");
     }
@@ -1190,7 +1207,11 @@ mod tests {
 
     #[test]
     fn a_library_root_is_rejected_alongside_other_collections() {
-        for inputs in [vec!["Alpha", "L1"], vec!["L1", "Alpha"], vec!["L2", "Alpha"]] {
+        for inputs in [
+            vec!["Alpha", "L1"],
+            vec!["L1", "Alpha"],
+            vec!["L2", "Alpha"],
+        ] {
             let err = resolved(&inputs).unwrap_err().to_string();
             assert!(err.contains("is a library root, not a collection"), "{err}");
             assert!(err.contains("one of several --collection values"), "{err}");
@@ -1247,7 +1268,10 @@ mod tests {
         };
 
         let human = format_output(&output, false);
-        assert!(human.contains("Partially filed: in Alpha (ROOT1)"), "{human}");
+        assert!(
+            human.contains("Partially filed: in Alpha (ROOT1)"),
+            "{human}"
+        );
         assert!(human.contains("NOT in: Beta (ROOT2)"), "{human}");
         assert!(
             human.contains("Finish with: zot edit ITEMKEY1 --add-collection ROOT2"),

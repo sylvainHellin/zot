@@ -20,7 +20,7 @@
 //! ("Queries per day") for everyone sharing the anonymous project, so it would
 //! be a path that never succeeds and whose error would mask OpenLibrary's.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::Value;
 
@@ -472,7 +472,12 @@ fn medline_to_bibtex(text: &str, pmid: &str) -> Result<String> {
     // where a PMID belongs and what the duplicate guard reads.
     entry.push(("note", format!("PMID: {pmid}")));
 
-    let key = citekey(authors.first().map(String::as_str), year.as_deref(), &title, pmid);
+    let key = citekey(
+        authors.first().map(String::as_str),
+        year.as_deref(),
+        &title,
+        pmid,
+    );
     Ok(bibtex_entry("article", &key, &entry))
 }
 
@@ -513,8 +518,8 @@ fn openlibrary_to_bibtex(body: &str, isbn: &str) -> Result<String> {
             .unwrap_or_default()
     };
 
-    let mut title =
-        text("title").with_context(|| format!("OpenLibrary record for ISBN {isbn} has no title"))?;
+    let mut title = text("title")
+        .with_context(|| format!("OpenLibrary record for ISBN {isbn} has no title"))?;
     if let Some(subtitle) = text("subtitle") {
         title = format!("{}: {subtitle}", title.trim_end_matches(':').trim());
     }
@@ -538,7 +543,12 @@ fn openlibrary_to_bibtex(body: &str, isbn: &str) -> Result<String> {
     }
     entry.push(("isbn", isbn.to_string()));
 
-    let key = citekey(authors.first().map(String::as_str), year.as_deref(), &title, isbn);
+    let key = citekey(
+        authors.first().map(String::as_str),
+        year.as_deref(),
+        &title,
+        isbn,
+    );
     Ok(bibtex_entry("book", &key, &entry))
 }
 
@@ -575,7 +585,11 @@ fn citekey(first_author: Option<&str>, year: Option<&str>, title: &str, fallback
         .map(ascii)
         .find(|w| !w.is_empty())
         .unwrap_or_default();
-    let stem = if last.is_empty() { ascii(fallback) } else { last };
+    let stem = if last.is_empty() {
+        ascii(fallback)
+    } else {
+        last
+    };
     format!("{stem}{}{word}", year.unwrap_or_default())
 }
 
@@ -729,15 +743,30 @@ mod tests {
     #[test]
     fn isbn_check_digits_decide_what_is_an_isbn() {
         // ISBN-13 and ISBN-10 of the same book, bare, hyphenated and spaced.
-        assert_eq!(normalize_isbn("9780262035613").as_deref(), Some("9780262035613"));
-        assert_eq!(normalize_isbn("978-0-262-03561-3").as_deref(), Some("9780262035613"));
-        assert_eq!(normalize_isbn("978 0 262 03561 3").as_deref(), Some("9780262035613"));
+        assert_eq!(
+            normalize_isbn("9780262035613").as_deref(),
+            Some("9780262035613")
+        );
+        assert_eq!(
+            normalize_isbn("978-0-262-03561-3").as_deref(),
+            Some("9780262035613")
+        );
+        assert_eq!(
+            normalize_isbn("978 0 262 03561 3").as_deref(),
+            Some("9780262035613")
+        );
         assert_eq!(normalize_isbn("0262035618").as_deref(), Some("0262035618"));
-        assert_eq!(normalize_isbn("0-262-03561-8").as_deref(), Some("0262035618"));
+        assert_eq!(
+            normalize_isbn("0-262-03561-8").as_deref(),
+            Some("0262035618")
+        );
 
         // An X check digit counts as 10, and is normalised to uppercase.
         assert_eq!(normalize_isbn("043942089X").as_deref(), Some("043942089X"));
-        assert_eq!(normalize_isbn("0-439-42089-x").as_deref(), Some("043942089X"));
+        assert_eq!(
+            normalize_isbn("0-439-42089-x").as_deref(),
+            Some("043942089X")
+        );
 
         // Wrong check digit, either length.
         assert!(normalize_isbn("9780262035614").is_none());
@@ -772,7 +801,12 @@ mod tests {
             Identifier::Isbn("043942089X".into())
         );
 
-        for input in ["23193287", "PMID:23193287", "pmid: 23193287", "PubMed:23193287"] {
+        for input in [
+            "23193287",
+            "PMID:23193287",
+            "pmid: 23193287",
+            "PubMed:23193287",
+        ] {
             assert_eq!(
                 parse_identifier(input).unwrap(),
                 Identifier::Pmid("23193287".into()),
@@ -788,7 +822,9 @@ mod tests {
         assert!(parse_identifier("0123456").is_err());
         // An explicit prefix says what the value is meant to be, so a bad one
         // gets an error about that type rather than the generic list.
-        let err = parse_identifier("ISBN:9780262035614").unwrap_err().to_string();
+        let err = parse_identifier("ISBN:9780262035614")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Not a valid ISBN"), "{err}");
         let err = parse_identifier("PMID:abc").unwrap_err().to_string();
         assert!(err.contains("Not a valid PubMed ID"), "{err}");
@@ -869,7 +905,10 @@ mod tests {
             "{bib}"
         );
         // JT wins over TA.
-        assert!(bib.contains("\tjournal = {Nucleic acids research},\n"), "{bib}");
+        assert!(
+            bib.contains("\tjournal = {Nucleic acids research},\n"),
+            "{bib}"
+        );
         // DP is compound: only the year belongs in the year field.
         assert!(bib.contains("\tyear = {2013},\n"), "{bib}");
         assert!(bib.contains("\tvolume = {41},\n"), "{bib}");
@@ -975,8 +1014,13 @@ mod tests {
     fn an_isbn_openlibrary_does_not_know_is_reported_as_not_found() {
         // OpenLibrary answers an unknown bibkey with 200 and `{}`, so the
         // status code never says "not found" and the body has to.
-        let err = openlibrary_to_bibtex("{}", "9783161484100").unwrap_err().to_string();
-        assert!(err.contains("No book found for ISBN 9783161484100"), "{err}");
+        let err = openlibrary_to_bibtex("{}", "9783161484100")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("No book found for ISBN 9783161484100"),
+            "{err}"
+        );
         assert!(err.contains("OpenLibrary"), "{err}");
         // A record filed under some other ISBN is not this book either.
         assert!(openlibrary_to_bibtex(OPENLIBRARY, "9780262035620").is_err());

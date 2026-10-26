@@ -37,10 +37,7 @@ pub fn run_fulltext(
 
     // Get title from the metadata chunk
     let chunks = store.get_item_chunks(key)?;
-    let title = chunks
-        .first()
-        .map(|c| c.title.clone())
-        .unwrap_or_default();
+    let title = chunks.first().map(|c| c.title.clone()).unwrap_or_default();
 
     let output = FulltextOutput {
         key: key.to_string(),
@@ -57,7 +54,10 @@ pub fn run_fulltext(
 
 /// Character-indexed substring `[start, end)`, safe on multibyte text.
 fn char_slice(s: &str, start: usize, end: usize) -> String {
-    s.chars().skip(start).take(end.saturating_sub(start)).collect()
+    s.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 #[cfg(test)]

@@ -508,8 +508,8 @@ fn main() {
             force,
             flat,
             tree_ids,
-        } => commands::collections_cmd::run_collections(
-            commands::collections_cmd::CollectionsArgs {
+        } => {
+            commands::collections_cmd::run_collections(commands::collections_cmd::CollectionsArgs {
                 collection: collection.as_deref(),
                 create: create.as_deref(),
                 parent: parent.as_deref(),
@@ -518,8 +518,8 @@ fn main() {
                 flat,
                 tree_ids,
                 json,
-            },
-        ),
+            })
+        }
         Commands::Unfiled { count } => commands::unfiled_cmd::run_unfiled(count, json),
         Commands::Add {
             identifier,

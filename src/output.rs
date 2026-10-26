@@ -93,10 +93,7 @@ impl HumanDisplay for SearchOutput {
                 out.push_str(&format!("   > {}\n", snippet.replace('\n', " ")));
             }
             if r.chunk_type == "fulltext" {
-                out.push_str(&format!(
-                    "   chars {}-{}\n",
-                    r.char_start, r.char_end
-                ));
+                out.push_str(&format!("   chars {}-{}\n", r.char_start, r.char_end));
             }
         }
         out
@@ -170,10 +167,7 @@ pub struct FindResultOutput {
 
 impl HumanDisplay for FindOutput {
     fn human_display(&self) -> String {
-        let mut out = format!(
-            "Find: \"{}\"\nResults: {}\n",
-            self.query, self.result_count
-        );
+        let mut out = format!("Find: \"{}\"\nResults: {}\n", self.query, self.result_count);
         for (i, r) in self.results.iter().enumerate() {
             out.push_str(&format!(
                 "\n{}. [{}] {}\n   {} | {} | {}\n",
@@ -507,7 +501,10 @@ impl HumanDisplay for TagRenamedOutput {
         }
         out.push_str(".\n");
         if self.removed_old_tag {
-            out.push_str(&format!("  \"{}\" no longer exists in the library.\n", self.old));
+            out.push_str(&format!(
+                "  \"{}\" no longer exists in the library.\n",
+                self.old
+            ));
         }
         if let Some(note) = &self.note {
             out.push_str(&format!("  {note}\n"));
@@ -565,7 +562,10 @@ impl HumanDisplay for CollectionsOutput {
         };
         let mut out = match &self.root {
             Some(root) => {
-                format!("Collections: {} (subtree of {root}, {items})\n\n", self.count)
+                format!(
+                    "Collections: {} (subtree of {root}, {items})\n\n",
+                    self.count
+                )
             }
             None => format!("Collections: {} ({items})\n\n", self.count),
         };
@@ -1036,8 +1036,8 @@ impl HumanDisplay for IndexIssuesOutput {
 #[cfg(test)]
 mod tests {
     use super::{
-        CollectionCreatedOutput, CollectionDeletedOutput, CollectionRemovedOutput, ExportOutput,
-        HumanDisplay, format_output, truncate_display,
+        format_output, truncate_display, CollectionCreatedOutput, CollectionDeletedOutput,
+        CollectionRemovedOutput, ExportOutput, HumanDisplay,
     };
 
     fn export(exported: usize, path: Option<&str>, content: Option<&str>) -> ExportOutput {
@@ -1064,7 +1064,10 @@ mod tests {
     #[test]
     fn created_collection_names_its_parent_or_the_top_level() {
         let child = created(Some(("ROOT1234", "Reading")), true).human_display();
-        assert!(child.contains("Created collection: Papers [NEWKEY12]"), "{child}");
+        assert!(
+            child.contains("Created collection: Papers [NEWKEY12]"),
+            "{child}"
+        );
         assert!(child.contains("Parent: Reading [ROOT1234]"), "{child}");
         assert!(child.contains("shows it now"), "{child}");
 
@@ -1075,7 +1078,10 @@ mod tests {
         assert!(root.contains("not synced down yet"), "{root}");
         // And it says so without reading as failure, which would invite a
         // re-run that the local-library duplicate check cannot catch yet.
-        assert!(root.contains("re-running --create would duplicate it"), "{root}");
+        assert!(
+            root.contains("re-running --create would duplicate it"),
+            "{root}"
+        );
     }
 
     #[test]
@@ -1089,21 +1095,24 @@ mod tests {
         assert_eq!(v["synced_local"], true);
     }
 
-
-    fn deleted(descendants: &[(&str, &str, usize)], parent: Option<&str>) -> CollectionDeletedOutput
-    {
+    fn deleted(
+        descendants: &[(&str, &str, usize)],
+        parent: Option<&str>,
+    ) -> CollectionDeletedOutput {
         let mut removed = vec![CollectionRemovedOutput {
             key: "OLDKEY12".to_string(),
             name: "Papers".to_string(),
             depth: 0,
         }];
-        removed.extend(descendants.iter().map(|(key, name, depth)| {
-            CollectionRemovedOutput {
-                key: (*key).to_string(),
-                name: (*name).to_string(),
-                depth: *depth,
-            }
-        }));
+        removed.extend(
+            descendants
+                .iter()
+                .map(|(key, name, depth)| CollectionRemovedOutput {
+                    key: (*key).to_string(),
+                    name: (*name).to_string(),
+                    depth: *depth,
+                }),
+        );
         CollectionDeletedOutput {
             key: "OLDKEY12".to_string(),
             name: "Papers".to_string(),
@@ -1121,15 +1130,24 @@ mod tests {
 
     #[test]
     fn deleted_collection_lists_every_collection_that_went_with_it() {
-        let out = deleted(&[("SUB1", "Drafts", 1), ("SUB2", "Old", 2)], Some("ROOT1234"))
-            .human_display();
-        assert!(out.contains("Deleted collection: Papers [OLDKEY12]"), "{out}");
+        let out = deleted(
+            &[("SUB1", "Drafts", 1), ("SUB2", "Old", 2)],
+            Some("ROOT1234"),
+        )
+        .human_display();
+        assert!(
+            out.contains("Deleted collection: Papers [OLDKEY12]"),
+            "{out}"
+        );
         assert!(out.contains("3 collections (2 descendants)"), "{out}");
         assert!(out.contains("Drafts [SUB1]"), "{out}");
         assert!(out.contains("Old [SUB2]"), "{out}");
         // The items are the thing a reader fears for, so the count says plainly
         // that none of them went.
-        assert!(out.contains("7 were filed there, 3 are now in no collection"), "{out}");
+        assert!(
+            out.contains("7 were filed there, 3 are now in no collection"),
+            "{out}"
+        );
         assert!(out.contains("none was deleted"), "{out}");
         assert!(out.contains("cannot be undone"), "{out}");
     }

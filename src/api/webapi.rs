@@ -409,7 +409,10 @@ impl WebApiClient {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         if !status.is_success() {
-            bail!("Web API has no template for item type {item_type} ({status}): {}", body.trim());
+            bail!(
+                "Web API has no template for item type {item_type} ({status}): {}",
+                body.trim()
+            );
         }
         serde_json::from_str(&body).context("Failed to parse the item template")
     }

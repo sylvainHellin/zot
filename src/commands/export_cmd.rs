@@ -1,12 +1,12 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::api::{ExportFormat, FORMAT_KEY_BATCH, ZoteroClient, ZoteroItem};
+use crate::api::{ExportFormat, ZoteroClient, ZoteroItem, FORMAT_KEY_BATCH};
 use crate::collections::{build_tree, resolve_collection_ref};
 use crate::commands::collections_cmd::connector_targets;
 use crate::commands::index_cmd::strip_html;
-use crate::output::{DroppedItemOutput, ExportOutput, format_output, truncate_display};
+use crate::output::{format_output, truncate_display, DroppedItemOutput, ExportOutput};
 
 /// BibTeX fields stripped unless `--raw` is given.
 ///
@@ -472,7 +472,7 @@ mod tests {
          \tannote = {another one},\n\
          \tpages = {16965--16974},\n\
          }\n"
-            .to_string()
+        .to_string()
     }
 
     #[test]
@@ -547,7 +547,10 @@ mod tests {
         let input = "@article{k,\n\tnote = {kept},\n\tannote = {gone},\n\tfilename = {kept},\n\
                      \tfile = {gone},\n}\n";
         let out = strip_bibtex_fields(input, &STRIP);
-        assert_eq!(out, "@article{k,\n\tnote = {kept},\n\tfilename = {kept},\n}\n");
+        assert_eq!(
+            out,
+            "@article{k,\n\tnote = {kept},\n\tfilename = {kept},\n}\n"
+        );
     }
 
     #[test]
@@ -601,7 +604,11 @@ mod tests {
 
     #[test]
     fn counts_nothing_in_an_empty_body() {
-        for format in [ExportFormat::Bibtex, ExportFormat::Ris, ExportFormat::CslJson] {
+        for format in [
+            ExportFormat::Bibtex,
+            ExportFormat::Ris,
+            ExportFormat::CslJson,
+        ] {
             assert_eq!(count_entries("", format).unwrap(), 0);
         }
     }
@@ -661,12 +668,20 @@ mod tests {
     fn a_note_on_a_non_note_item_still_names_its_type() {
         let items = [item("BBBB2222", "attachment", "", "<p>Scan of page 3</p>")];
         let map = title_map(&items);
-        assert_eq!(map.get("BBBB2222").unwrap(), "attachment note: Scan of page 3");
+        assert_eq!(
+            map.get("BBBB2222").unwrap(),
+            "attachment note: Scan of page 3"
+        );
     }
 
     #[test]
     fn a_note_whose_opening_lines_are_only_markup_skips_them() {
-        let items = [item("CCCC3333", "note", "", "<div>\n<h1>\nMeeting minutes\n</h1>\n</div>")];
+        let items = [item(
+            "CCCC3333",
+            "note",
+            "",
+            "<div>\n<h1>\nMeeting minutes\n</h1>\n</div>",
+        )];
         let map = title_map(&items);
         assert_eq!(map.get("CCCC3333").unwrap(), "note: Meeting minutes");
     }
@@ -713,8 +728,15 @@ mod tests {
 
     #[test]
     fn without_raw_bibtex_is_stripped() {
-        let out =
-            finish_export(2, &[sample()], Vec::new(), ExportFormat::Bibtex, false, None).unwrap();
+        let out = finish_export(
+            2,
+            &[sample()],
+            Vec::new(),
+            ExportFormat::Bibtex,
+            false,
+            None,
+        )
+        .unwrap();
         let content = out.content.as_deref().unwrap();
         assert!(!content.contains("\tfile = "));
         assert!(!content.contains("\tannote = "));

@@ -10,8 +10,8 @@
 //! drops whatever the target item type does not carry, using the item
 //! template from the web API (see [`fit_to_template`]).
 
-use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value, json};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Map, Value};
 
 /// One parsed BibTeX entry: lowercase type, citation key, and fields with
 /// lowercase names and raw (still LaTeX) values.
@@ -96,7 +96,11 @@ fn parse_body(chars: &[char], mut i: usize, close: char, kind: String) -> Result
     while i < chars.len() && chars[i] != ',' && chars[i] != close {
         i += 1;
     }
-    let key = chars[start..i].iter().collect::<String>().trim().to_string();
+    let key = chars[start..i]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string();
     let mut fields = Vec::new();
     loop {
         skip_ws(&mut i);
@@ -426,7 +430,9 @@ fn split_commas(raw: &str) -> Vec<String> {
 fn creator(raw: &str, creator_type: &str) -> Value {
     let trimmed = raw.trim();
     // `{World Health Organization}`: a corporate name, kept whole.
-    if trimmed.starts_with('{') && skip_balanced(&trimmed.chars().collect::<Vec<_>>(), 1, '}') == trimmed.chars().count() {
+    if trimmed.starts_with('{')
+        && skip_balanced(&trimmed.chars().collect::<Vec<_>>(), 1, '}') == trimmed.chars().count()
+    {
         return json!({ "creatorType": creator_type, "name": delatex(trimmed) });
     }
     let parts = split_commas(trimmed);
@@ -531,15 +537,24 @@ pub fn to_zotero(entry: &Entry) -> Value {
     set("ISSN", entry.text("issn"));
     set("volume", entry.text("volume"));
     set("publisher", entry.text("publisher"));
-    set("place", entry.text("address").or_else(|| entry.text("location")));
+    set(
+        "place",
+        entry.text("address").or_else(|| entry.text("location")),
+    );
     set("series", entry.text("series"));
     set("edition", entry.text("edition"));
     set("language", entry.text("language"));
     let pages = entry.text("pages");
     match item_type {
         "journalArticle" => {
-            set("publicationTitle", entry.text("journal").or_else(|| entry.text("journaltitle")));
-            set("issue", entry.text("number").or_else(|| entry.text("issue")));
+            set(
+                "publicationTitle",
+                entry.text("journal").or_else(|| entry.text("journaltitle")),
+            );
+            set(
+                "issue",
+                entry.text("number").or_else(|| entry.text("issue")),
+            );
             set("pages", pages);
         }
         "conferencePaper" => {
@@ -556,7 +571,10 @@ pub fn to_zotero(entry: &Entry) -> Value {
             set("numPages", pages);
         }
         "thesis" => {
-            set("university", entry.text("school").or_else(|| entry.text("institution")));
+            set(
+                "university",
+                entry.text("school").or_else(|| entry.text("institution")),
+            );
             set(
                 "thesisType",
                 Some(match entry.kind.as_str() {
@@ -662,7 +680,8 @@ mod tests {
 
     #[test]
     fn parses_a_crossref_entry() {
-        let bib = "@article{Smith_2020, title={A {GPU} study of {\\\"u}ber-fast \\& small things}, \
+        let bib =
+            "@article{Smith_2020, title={A {GPU} study of {\\\"u}ber-fast \\& small things}, \
                    volume={12}, ISSN={1234-5678}, url={http://dx.doi.org/10.1/x}, DOI={10.1/x}, \
                    number={3}, journal={Journal of Things}, publisher={Elsevier BV}, \
                    author={Smith, John and M{\\\"u}ller, J{\\\"o}rg and van der Berg, Anna}, \
@@ -698,7 +717,8 @@ mod tests {
 
     #[test]
     fn a_datacite_arxiv_doi_entry_becomes_a_preprint() {
-        let bib = "@misc{https://doi.org/10.48550/arxiv.2401.12345, doi = {10.48550/ARXIV.2401.12345}, \
+        let bib =
+            "@misc{https://doi.org/10.48550/arxiv.2401.12345, doi = {10.48550/ARXIV.2401.12345}, \
                    author = {Doe, Jane}, title = {Thing}, publisher = {arXiv}, year = {2024}}";
         let item = bibtex_to_zotero(bib).unwrap();
         assert_eq!(item["itemType"], "preprint");
@@ -730,8 +750,14 @@ mod tests {
 
     #[test]
     fn accents_in_every_spelling_decode() {
-        assert_eq!(delatex("{\\'e}t{\\'{e}} \\c{c}a \\v{S}koda Ma{\\ss}e {\\o}"), "été ça Škoda Maße ø");
-        assert_eq!(delatex("na\\\"{\\i}ve \\textendash{} x"), "naïve \u{2013} x");
+        assert_eq!(
+            delatex("{\\'e}t{\\'{e}} \\c{c}a \\v{S}koda Ma{\\ss}e {\\o}"),
+            "été ça Škoda Maße ø"
+        );
+        assert_eq!(
+            delatex("na\\\"{\\i}ve \\textendash{} x"),
+            "naïve \u{2013} x"
+        );
         assert_eq!(delatex("Discovery &amp; Data"), "Discovery & Data");
     }
 
@@ -741,8 +767,8 @@ mod tests {
     #[test]
     #[ignore]
     fn live_resolver_entries_fit_their_templates() {
-        use crate::api::WebApiClient;
         use crate::api::resolve::{fetch_bibtex, parse_identifier};
+        use crate::api::WebApiClient;
         let web = WebApiClient::from_config().unwrap();
         for id in [
             "10.1016/j.autcon.2023.104812",
@@ -759,8 +785,18 @@ mod tests {
                 .unwrap();
             let fitted = fit_to_template(item.clone(), &template).unwrap();
             println!("{id}\n  {fitted}\n");
-            assert!(!fitted["title"].as_str().unwrap_or_default().is_empty(), "{id}");
-            assert!(fitted["title"].as_str().unwrap().chars().all(|c| c != '{' && c != '\\'), "{id}");
+            assert!(
+                !fitted["title"].as_str().unwrap_or_default().is_empty(),
+                "{id}"
+            );
+            assert!(
+                fitted["title"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .all(|c| c != '{' && c != '\\'),
+                "{id}"
+            );
             assert!(!fitted["creators"].as_array().unwrap().is_empty(), "{id}");
         }
     }
@@ -769,7 +805,8 @@ mod tests {
     fn fields_the_type_lacks_are_dropped_or_moved_to_extra() {
         let item = json!({ "itemType": "bookSection", "title": "T", "DOI": "10.1/x",
                            "ISSN": "1", "bogus": "y", "extra": "PMID: 1" });
-        let template = json!({ "itemType": "bookSection", "title": "", "extra": "", "creators": [] });
+        let template =
+            json!({ "itemType": "bookSection", "title": "", "extra": "", "creators": [] });
         let fitted = fit_to_template(item, &template).unwrap();
         assert!(fitted.get("bogus").is_none());
         assert!(fitted.get("DOI").is_none());

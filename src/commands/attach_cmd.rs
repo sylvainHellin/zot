@@ -2,12 +2,12 @@
 //! (create attachment item, then the 3-step storage upload). The file syncs
 //! down to the local library on the next Zotero sync.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::path::Path;
 
 use crate::api::WebApiClient;
-use crate::output::{AttachOutput, format_output};
+use crate::output::{format_output, AttachOutput};
 
 pub fn run_attach(key: &str, file: &str, title: Option<&str>, json: bool) -> Result<()> {
     let path = Path::new(file);
@@ -49,7 +49,10 @@ pub fn run_attach(key: &str, file: &str, title: Option<&str>, json: bool) -> Res
         .to_string();
 
     // 2+3. Upload the file bytes to Zotero storage.
-    eprintln!("Uploading {filename} ({} KB)...", path.metadata()?.len() / 1024);
+    eprintln!(
+        "Uploading {filename} ({} KB)...",
+        path.metadata()?.len() / 1024
+    );
     web.upload_attachment_file(&attachment_key, path)?;
 
     let output = AttachOutput {
@@ -57,8 +60,7 @@ pub fn run_attach(key: &str, file: &str, title: Option<&str>, json: bool) -> Res
         parent_title,
         attachment_key,
         filename: filename.to_string(),
-        note: "Attached via web API; the file appears locally on the next Zotero sync."
-            .to_string(),
+        note: "Attached via web API; the file appears locally on the next Zotero sync.".to_string(),
     };
     println!("{}", format_output(&output, json));
     Ok(())

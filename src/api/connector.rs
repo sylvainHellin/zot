@@ -10,7 +10,7 @@
 //!   - `POST /connector/updateSession` retargets a save session (collection,
 //!     tags) after the fact.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -88,10 +88,7 @@ impl ConnectorClient {
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if !status.is_success() {
-            bail!(
-                "Zotero import failed (status {status}): {}",
-                text.trim()
-            );
+            bail!("Zotero import failed (status {status}): {}", text.trim());
         }
         let value: Value = serde_json::from_str(&text)
             .with_context(|| format!("Failed to parse import response: {}", text.trim()))?;
@@ -124,10 +121,7 @@ impl ConnectorClient {
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if !status.is_success() {
-            bail!(
-                "Zotero PDF save failed (status {status}): {}",
-                text.trim()
-            );
+            bail!("Zotero PDF save failed (status {status}): {}", text.trim());
         }
         let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         Ok(value)

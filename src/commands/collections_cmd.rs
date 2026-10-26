@@ -1,19 +1,19 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use crate::api::ZoteroClient;
 use crate::api::connector::{ConnectorClient, SaveTarget};
 use crate::api::models::ZoteroItem;
 use crate::api::webapi::{VersionConflict, WebApiClient};
+use crate::api::ZoteroClient;
 use crate::collections::{
-    CollectionNode, CollectionRef, LIBRARY_ROOT_ID, attach_connector_ids, build_tree,
-    resolve_collection_ref, roll_up_counts, sibling_named, sibling_named_ignoring_case,
+    attach_connector_ids, build_tree, resolve_collection_ref, roll_up_counts, sibling_named,
+    sibling_named_ignoring_case, CollectionNode, CollectionRef, LIBRARY_ROOT_ID,
 };
 use crate::output::{
-    CollectionCreatedOutput, CollectionDeletedOutput, CollectionOutput, CollectionRemovedOutput,
-    CollectionsOutput, format_output,
+    format_output, CollectionCreatedOutput, CollectionDeletedOutput, CollectionOutput,
+    CollectionRemovedOutput, CollectionsOutput,
 };
 
 /// How long to wait for a collection created on api.zotero.org to be synced
@@ -448,11 +448,7 @@ fn delete_target(resolved: &CollectionRef) -> Result<String> {
 /// `item_count` counts distinct items, since an item filed in both a parent and
 /// a child is one item; `unfiled_count` is the subset filed nowhere else, which
 /// is the only number that describes real loss of structure.
-fn delete_scope(
-    nodes: &[CollectionNode],
-    items: &[ZoteroItem],
-    key: &str,
-) -> Result<DeleteScope> {
+fn delete_scope(nodes: &[CollectionNode], items: &[ZoteroItem], key: &str) -> Result<DeleteScope> {
     let doomed = subtree(nodes, key);
     let Some(root) = doomed.first() else {
         bail!("Collection {key} is not in the local library, so there is nothing to delete.");
@@ -553,7 +549,10 @@ fn reconcile_with_server(
             .and_then(|m| m.get("numCollections"))
             .and_then(|n| n.as_u64())
             .with_context(|| {
-                format!("No meta.numCollections on collection {} from the web API", doomed.key)
+                format!(
+                    "No meta.numCollections on collection {} from the web API",
+                    doomed.key
+                )
             })?;
         if !child_counts_agree(local_children, server_children) {
             bail!(
@@ -778,12 +777,18 @@ mod tests {
         let group_root = create_parent(&reference(None, Some("L2"), "Group Library"))
             .unwrap_err()
             .to_string();
-        assert!(group_root.contains("another library's root"), "{group_root}");
+        assert!(
+            group_root.contains("another library's root"),
+            "{group_root}"
+        );
 
         let group_collection = create_parent(&reference(None, Some("C9"), "Group Only"))
             .unwrap_err()
             .to_string();
-        assert!(group_collection.contains("group library"), "{group_collection}");
+        assert!(
+            group_collection.contains("group library"),
+            "{group_collection}"
+        );
 
         let nothing = create_parent(&reference(None, None, "Nowhere"))
             .unwrap_err()
@@ -797,9 +802,7 @@ mod tests {
         let preorder: Vec<&str> = nodes.iter().map(|n| n.key.as_str()).collect();
         assert_eq!(
             preorder,
-            vec![
-                "ROOT1", "MID", "DEEP", "DEEPER", "ELM", "BETA", "ROOT2", "LAST"
-            ],
+            vec!["ROOT1", "MID", "DEEP", "DEEPER", "ELM", "BETA", "ROOT2", "LAST"],
             "fixture preorder"
         );
         // BETA sits right after MID's last descendant, at MID's own depth.
@@ -947,8 +950,14 @@ mod tests {
 
     #[test]
     fn delete_gate_skips_the_prompt_under_force_with_or_without_a_terminal() {
-        assert_eq!(delete_gate(&scope_of("MID", &[]), true, false).unwrap(), Gate::Forced);
-        assert_eq!(delete_gate(&scope_of("MID", &[]), true, true).unwrap(), Gate::Forced);
+        assert_eq!(
+            delete_gate(&scope_of("MID", &[]), true, false).unwrap(),
+            Gate::Forced
+        );
+        assert_eq!(
+            delete_gate(&scope_of("MID", &[]), true, true).unwrap(),
+            Gate::Forced
+        );
     }
 
     #[test]
@@ -961,11 +970,17 @@ mod tests {
 
     #[test]
     fn delete_summary_of_a_parent_names_every_descendant_and_both_item_counts() {
-        let items = [item("I1", &["MID", "DEEP"]), item("I2", &["DEEPER", "BETA"])];
+        let items = [
+            item("I1", &["MID", "DEEP"]),
+            item("I2", &["DEEPER", "BETA"]),
+        ];
         let summary = delete_summary(&scope_of("MID", &items));
         assert!(summary.contains("3 descendant collection(s)"), "{summary}");
         for key in ["DEEP", "DEEPER", "ELM"] {
-            assert!(summary.contains(&format!("[{key}]")), "missing {key}: {summary}");
+            assert!(
+                summary.contains(&format!("[{key}]")),
+                "missing {key}: {summary}"
+            );
         }
         assert!(
             summary.contains("2 item(s) are filed there; 1 of them would end up in no collection"),
@@ -988,7 +1003,10 @@ mod tests {
         let from_root = delete_summary(&scope_of("ROOT1", &[]));
         assert!(from_root.contains("\n    apple [MID]\n"), "{from_root}");
         assert!(from_root.contains("\n      Deep [DEEP]\n"), "{from_root}");
-        assert!(from_root.contains("\n        Deeper [DEEPER]\n"), "{from_root}");
+        assert!(
+            from_root.contains("\n        Deeper [DEEPER]\n"),
+            "{from_root}"
+        );
     }
 
     #[test]
@@ -1044,7 +1062,10 @@ mod tests {
     fn delete_summary_always_states_that_items_survive_and_nothing_can_be_undone() {
         for key in ["DEEPER", "MID", "ROOT1"] {
             let summary = delete_summary(&scope_of(key, &[item("I1", &["DEEP"])]));
-            assert!(summary.contains("NOT deleted, only unfiled"), "{key}: {summary}");
+            assert!(
+                summary.contains("NOT deleted, only unfiled"),
+                "{key}: {summary}"
+            );
             assert!(summary.contains("cannot be undone"), "{key}: {summary}");
         }
     }

@@ -3,14 +3,14 @@
 //! The local API is read-only, so edits go through api.zotero.org and sync
 //! back to the desktop app (usually within seconds with auto-sync on).
 
-use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value, json};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use crate::api::connector::{ConnectorClient, SaveTarget};
 use crate::api::{WebApiClient, ZoteroClient};
-use crate::collections::{CollectionNode, build_tree, resolve_collection_ref};
-use crate::output::{EditOutput, format_output};
+use crate::collections::{build_tree, resolve_collection_ref, CollectionNode};
+use crate::output::{format_output, EditOutput};
 
 pub struct EditArgs<'a> {
     pub key: &'a str,
@@ -53,7 +53,10 @@ pub fn run_edit(args: EditArgs) -> Result<()> {
     let collection_edit = if add_collections.is_empty() && rm_collections.is_empty() {
         None
     } else {
-        Some(ResolvedCollections::resolve(add_collections, rm_collections)?)
+        Some(ResolvedCollections::resolve(
+            add_collections,
+            rm_collections,
+        )?)
     };
 
     let web = WebApiClient::from_config()?;
@@ -162,10 +165,12 @@ pub fn run_edit(args: EditArgs) -> Result<()> {
 
     let changed_fields: Vec<String> = data
         .keys()
-        .map(|field| match (field.as_str(), collections_change.as_ref()) {
-            ("collections", Some(detail)) => detail.clone(),
-            _ => field.clone(),
-        })
+        .map(
+            |field| match (field.as_str(), collections_change.as_ref()) {
+                ("collections", Some(detail)) => detail.clone(),
+                _ => field.clone(),
+            },
+        )
         .collect();
     let new_version = web.patch_item(key, &Value::Object(data), version)?;
 
@@ -297,10 +302,10 @@ pub(super) fn merge_collections(current: &[String], add: &[String], rm: &[String
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedCollections, merge_collections};
+    use super::{merge_collections, ResolvedCollections};
     use crate::api::connector::SaveTarget;
     use crate::api::models::ZoteroCollection;
-    use crate::collections::{CollectionNode, build_tree};
+    use crate::collections::{build_tree, CollectionNode};
     use serde_json::json;
 
     fn v(items: &[&str]) -> Vec<String> {
@@ -365,7 +370,10 @@ mod tests {
     #[test]
     fn library_root_is_rejected() {
         let err = resolved(&["L1"], &[]).unwrap_err().to_string();
-        assert!(err.contains("is the library root, not a collection"), "{err}");
+        assert!(
+            err.contains("is the library root, not a collection"),
+            "{err}"
+        );
     }
 
     #[test]

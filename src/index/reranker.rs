@@ -10,7 +10,12 @@ pub struct RerankResult {
 
 /// Trait for reranking models -- allows future model swaps.
 pub trait Reranker: Send + Sync {
-    fn rerank(&mut self, query: &str, documents: &[&str], top_n: usize) -> Result<Vec<RerankResult>>;
+    fn rerank(
+        &mut self,
+        query: &str,
+        documents: &[&str],
+        top_n: usize,
+    ) -> Result<Vec<RerankResult>>;
     /// Human-readable model name. Used for diagnostics / future model selection.
     #[allow(dead_code)]
     fn name(&self) -> &str;
@@ -34,7 +39,12 @@ impl BgeRerankerBase {
 }
 
 impl Reranker for BgeRerankerBase {
-    fn rerank(&mut self, query: &str, documents: &[&str], top_n: usize) -> Result<Vec<RerankResult>> {
+    fn rerank(
+        &mut self,
+        query: &str,
+        documents: &[&str],
+        top_n: usize,
+    ) -> Result<Vec<RerankResult>> {
         if documents.is_empty() {
             return Ok(Vec::new());
         }

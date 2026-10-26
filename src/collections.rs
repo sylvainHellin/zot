@@ -9,7 +9,7 @@
 //! library, `C42` for a collection). Nothing in either payload links the two,
 //! so they are paired by full name path (see `pair_connector_ids`).
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 
 use crate::api::connector::SaveTarget;

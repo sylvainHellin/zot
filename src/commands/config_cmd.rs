@@ -2,10 +2,10 @@
 //! commands (`edit`, `attach`, `rm`). Stored in the platform config dir;
 //! re-run `set-key` any time to rotate the key.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::config::Config;
-use crate::output::{ConfigOutput, format_output};
+use crate::output::{format_output, ConfigOutput};
 
 pub fn run_set_key(key: &str, json: bool) -> Result<()> {
     let key = key.trim();

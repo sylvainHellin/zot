@@ -3,11 +3,11 @@ use std::collections::HashMap;
 
 use crate::api::ZoteroClient;
 use crate::index::{
-    BgeSmallEmbedder, Embedder, ExtractOutcome, ExtractStatus, IndexStore, IndexableItem,
-    ItemStatusRecord, ItemText, SyncDiff, chunk_item, compute_sync_diff, text_hash,
+    chunk_item, compute_sync_diff, text_hash, BgeSmallEmbedder, Embedder, ExtractOutcome,
+    ExtractStatus, IndexStore, IndexableItem, ItemStatusRecord, ItemText, SyncDiff,
 };
 use crate::output::{
-    IndexIssueOutput, IndexIssuesOutput, IndexStatusOutput, format_output, truncate_display,
+    format_output, truncate_display, IndexIssueOutput, IndexIssuesOutput, IndexStatusOutput,
 };
 
 /// Commit + persist progress every this many regular items, so an interrupted
@@ -130,7 +130,12 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
             if !outcome.detail.is_empty() {
                 match outcome.status {
                     ExtractStatus::Partial | ExtractStatus::Suspicious => {
-                        eprintln!("\n    Warning: {} ({}): {}", item.key, outcome.status.as_str(), outcome.detail);
+                        eprintln!(
+                            "\n    Warning: {} ({}): {}",
+                            item.key,
+                            outcome.status.as_str(),
+                            outcome.detail
+                        );
                     }
                     ExtractStatus::Failed => {
                         eprintln!("\n    Warning: {}: {}", item.key, outcome.detail);
@@ -262,7 +267,9 @@ pub fn run_index(force: bool, _json: bool) -> Result<()> {
     let meta = store.meta();
     eprintln!(
         "Done. Indexed {} items, {} chunks, {} vectors.",
-        meta.item_count, meta.chunk_count, store.vector_count()
+        meta.item_count,
+        meta.chunk_count,
+        store.vector_count()
     );
 
     Ok(())
@@ -477,7 +484,9 @@ fn extract_own_html(client: &ZoteroClient, item_key: &str) -> ExtractOutcome {
 fn run_pdf_extraction(pdf_path: &std::path::Path, source: &str) -> ExtractOutcome {
     match crate::index::pdf::extract_text(pdf_path) {
         Ok(mut outcome) => {
-            if !source.is_empty() && outcome.status == ExtractStatus::Ok && outcome.detail.is_empty()
+            if !source.is_empty()
+                && outcome.status == ExtractStatus::Ok
+                && outcome.detail.is_empty()
             {
                 outcome.detail = format!("{source}: extracted");
             }
@@ -575,14 +584,14 @@ fn decode_entities(s: &str) -> String {
     out
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn strip_html_removes_tags_and_collapses_whitespace() {
-        let html = "<div data-schema-version=\"9\"><h1>Title</h1>\n<p>Hello <b>world</b>.</p></div>";
+        let html =
+            "<div data-schema-version=\"9\"><h1>Title</h1>\n<p>Hello <b>world</b>.</p></div>";
         assert_eq!(strip_html(html), "Title Hello world .");
     }
 

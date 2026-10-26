@@ -163,8 +163,8 @@ fn strip_html(html: &str) -> String {
     while i < html.len() {
         if bytes[i] == b'<' {
             // Skip script/style blocks wholesale, including their text content.
-            if let Some(skip_to) = skip_raw_block(&lower, i, "script")
-                .or_else(|| skip_raw_block(&lower, i, "style"))
+            if let Some(skip_to) =
+                skip_raw_block(&lower, i, "script").or_else(|| skip_raw_block(&lower, i, "style"))
             {
                 i = skip_to;
                 out.push(' ');

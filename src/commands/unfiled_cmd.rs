@@ -10,9 +10,9 @@
 
 use anyhow::Result;
 
-use crate::api::ZoteroClient;
 use crate::api::models::ZoteroItem;
-use crate::output::{UnfiledItemOutput, UnfiledOutput, format_output};
+use crate::api::ZoteroClient;
+use crate::output::{format_output, UnfiledItemOutput, UnfiledOutput};
 
 pub fn run_unfiled(count: bool, json: bool) -> Result<()> {
     let client = ZoteroClient::new()?;
