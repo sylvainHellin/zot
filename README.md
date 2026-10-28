@@ -164,6 +164,9 @@ zot find "transformer" \
   --limit 25
 ```
 
+A DOI (bare or as a doi.org URL) or arXiv ID as the query searches every field and keeps only the items whose DOI, URL or Extra field carries it, so `zot find 10.1155/2021/6674980` finds the paper without `--everything`.
+A fragment of an identifier still needs `--everything`; an empty default search says so on stderr.
+
 ### `index`
 
 ```bash
