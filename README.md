@@ -1,7 +1,7 @@
 # zot
 
 A CLI for querying and maintaining your local [Zotero](https://www.zotero.org/) library.
-It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv/ISBN/PubMed ID or PDF, edit metadata, attach files, and trash items.
+It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv/ISBN/PubMed ID or PDF, edit metadata, attach files, highlight PDF passages, and trash items.
 
 `zot` reads through the Zotero local HTTP API (the desktop app's built-in server at `http://localhost:23119`) whenever the app is running, since that is fastest and needs no key.
 When the app is closed it falls back to the Zotero web API (api.zotero.org) with the key from `zot config set-key`, so every command also works on a machine where the app is not open (see [Without the desktop app](#without-the-desktop-app)).
@@ -12,6 +12,7 @@ For semantic search it builds a local index (embeddings plus a Tantivy full-text
 - Rust toolchain (`cargo`), installed via [rustup](https://rustup.rs/).
 - Zotero desktop running, with the local API enabled under *Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"*, or a web API key configured with `zot config set-key` for use without the app.
   With both, the app is used when it answers and the web API otherwise.
+- `zot annotate` needs poppler's `pdftotext` and `pdfinfo` on the `PATH` (`brew install poppler` on macOS, `apt install poppler-utils` on Debian/Ubuntu).
 - First use of `--rerank` downloads a BGE reranker model of about 1 GB (cached by `fastembed`).
   The default embedding model is small and downloads automatically.
 
@@ -84,6 +85,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv/ISBN/PubMed identifier and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
+| `zot annotate <key>` | Highlight a PDF passage found by its first and last words, with an optional comment, colour and tags (web API plus sync). `--dry-run` only locates it. |
 | `zot rm <key>...` | Move items to the Zotero trash (web API plus sync, restorable). |
 | `zot config` | One-time setup of the Zotero web API key for the write commands. |
 
@@ -312,6 +314,33 @@ A filing loop can therefore re-run over items it has already filed without speci
 
 An item created locally moments ago, for example via `zot add`, must sync up before `edit`, `attach`, or `rm` can see it.
 If you get "not found on api.zotero.org", sync Zotero and retry.
+
+## Highlighting passages (`zot annotate`)
+
+```bash
+zot annotate 9N6GPTP2 --from "the total revenue" --to "search vendors between" --dry-run
+zot annotate 9N6GPTP2 --from "the total revenue" --to "search vendors between" \
+  --comment "Market size claim" --color "#a28ae5" --tag first-pass
+zot annotate QHMJLIPH --from "..." --to "..." --page 3   # parent item, one physical page
+```
+
+The key is a PDF attachment, or a parent item with exactly one PDF; a parent with several lists them and asks for the attachment key.
+The PDF is read from local storage the way `zot pdf` finds it, so the attachment has to be synced up for the write to succeed.
+
+Matching works on whole words and ignores case and punctuation.
+`--from` is found first, then the nearest `--to` after it within 400 words on the same page, and the highlight covers everything in between.
+Word splitting may differ between the text you copied and the PDF: a superscript the PDF sets apart (`Kern3` against `Kern` `3`) and a word hyphenated across a line break both still match.
+`--page N` restricts the search to one physical page, counted from 1 whatever the printed label says.
+A passage that runs onto the next page is not found, since one highlight cannot span pages: annotate each page's part separately.
+
+`--dry-run` prints the page label, page index and matched text and creates nothing.
+Without it, the highlight is created through the web API as a Zotero annotation (default colour Zotero yellow `#ffd400`) and the new annotation key is printed; under `--json` the output also carries the sort index and the rects.
+It reaches the desktop app on the next sync.
+
+Word boxes come from poppler's `pdftotext -raw -bbox`, in content-stream order (the order Zotero's reader sees), and are merged into one rectangle per text line.
+They are mapped to PDF user space with the page's MediaBox origin and `/Rotate` taken into account, so highlights land correctly on cropped and rotated pages too.
+The box height follows the font's declared ascent and descent, so on a PDF with inflated font metrics the highlight is taller than the glyphs.
+A scanned PDF without a text layer has nothing to match.
 
 ## Creating collections (`zot collections --create`)
 

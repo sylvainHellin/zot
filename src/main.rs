@@ -1,3 +1,4 @@
+mod annotate;
 mod api;
 mod collections;
 mod commands;
@@ -352,6 +353,48 @@ enum Commands {
         title: Option<String>,
     },
 
+    /// Highlight a PDF passage found by its first and last words (via Zotero
+    /// web API + sync)
+    ///
+    /// Matching works on whole words and ignores case and punctuation: --from
+    /// is found first, then the nearest --to after it within 400 words on the
+    /// same page. Differences in word splitting are bridged (a superscript the
+    /// PDF sets apart, a word hyphenated across a line break). A passage that
+    /// runs onto the next page is not found: annotate each page's part
+    /// separately. Needs poppler's pdftotext and pdfinfo on the PATH.
+    Annotate {
+        /// PDF attachment key, or a parent item key with exactly one PDF
+        key: String,
+
+        /// First words of the passage
+        #[arg(long, value_name = "WORDS")]
+        from: String,
+
+        /// Last words of the passage
+        #[arg(long, value_name = "WORDS")]
+        to: String,
+
+        /// Comment attached to the highlight
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
+
+        /// Highlight colour as hex
+        #[arg(long, value_name = "HEX", default_value = commands::annotate_cmd::DEFAULT_COLOR)]
+        color: String,
+
+        /// Tag on the annotation (repeatable)
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+
+        /// Search only this physical page (1-based, not the printed label)
+        #[arg(long, value_name = "N")]
+        page: Option<usize>,
+
+        /// Locate and print the passage without creating anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Move items to the Zotero trash (via Zotero web API + sync)
     Rm {
         /// Zotero item key(s)
@@ -560,6 +603,26 @@ fn main() {
         Commands::Attach { key, file, title } => {
             commands::attach_cmd::run_attach(&key, &file, title.as_deref(), json)
         }
+        Commands::Annotate {
+            key,
+            from,
+            to,
+            comment,
+            color,
+            tags,
+            page,
+            dry_run,
+        } => commands::annotate_cmd::run_annotate(commands::annotate_cmd::AnnotateArgs {
+            key: &key,
+            from: &from,
+            to: &to,
+            comment: comment.as_deref(),
+            color: &color,
+            tags: &tags,
+            page,
+            dry_run,
+            json,
+        }),
         Commands::Rm { keys } => commands::rm_cmd::run_rm(&keys, json),
         Commands::Config { action } => match action {
             ConfigAction::SetKey { key } => commands::config_cmd::run_set_key(&key, json),

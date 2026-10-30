@@ -971,6 +971,45 @@ impl HumanDisplay for RmOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AnnotateOutput {
+    /// Key of the created annotation; `null` on a dry run.
+    pub key: Option<String>,
+    pub attachment_key: String,
+    /// 0-based physical page.
+    pub page_index: usize,
+    pub page_label: String,
+    pub text: String,
+    pub comment: String,
+    pub color: String,
+    pub tags: Vec<String>,
+    pub sort_index: String,
+    /// One rectangle per text line, `[x0, y0, x1, y1]` in PDF user space.
+    pub rects: Vec<[f64; 4]>,
+    pub dry_run: bool,
+    pub note: String,
+}
+
+impl HumanDisplay for AnnotateOutput {
+    fn human_display(&self) -> String {
+        let head = match &self.key {
+            Some(key) => format!(
+                "Created annotation {key} on attachment {}",
+                self.attachment_key
+            ),
+            None => format!("Would annotate attachment {}", self.attachment_key),
+        };
+        format!(
+            "{head}\n  Page {} (page index {}), {} line(s)\n  Text: {}\n  {}",
+            self.page_label,
+            self.page_index,
+            self.rects.len(),
+            self.text,
+            self.note,
+        )
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct ConfigOutput {
     pub path: String,
     pub api_key: Option<String>,

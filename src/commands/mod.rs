@@ -1,4 +1,5 @@
 pub mod add_cmd;
+pub mod annotate_cmd;
 pub mod attach_cmd;
 pub mod authors_cmd;
 pub mod collections_cmd;
