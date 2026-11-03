@@ -271,10 +271,52 @@ enum Commands {
         count: bool,
     },
 
-    /// Add a paper to the library (by DOI/arXiv/ISBN/PMID identifier and/or PDF)
+    /// Find literature in OpenAlex: keyword or semantic search, works citing
+    /// a paper or cited by it, each hit marked when the library holds it
+    Discover {
+        /// Keyword query, or with --semantic a phrase or passage (up to 2,000
+        /// characters); with --cited-by/--references it narrows that list
+        query: Option<String>,
+
+        /// Search by meaning over titles and abstracts (at most 50 hits)
+        #[arg(long)]
+        semantic: bool,
+
+        /// Works citing this paper: Zotero key, DOI, arXiv ID, PMID, PMCID
+        /// or OpenAlex ID (W...)
+        #[arg(long, value_name = "REF", conflicts_with = "references")]
+        cited_by: Option<String>,
+
+        /// Works this paper cites (same REF forms as --cited-by)
+        #[arg(long, value_name = "REF")]
+        references: Option<String>,
+
+        /// Publication years: 2021, 2018-2024, 2020- (from), -2020 (until)
+        #[arg(long)]
+        year: Option<String>,
+
+        /// Order: relevance (default; most cited for a citation list),
+        /// cited, or newest
+        #[arg(long, default_value = "relevance")]
+        sort: String,
+
+        /// Leave out the hits the library already holds
+        #[arg(long)]
+        not_in_library: bool,
+
+        /// Print each hit's abstract (always in --json)
+        #[arg(long)]
+        abstracts: bool,
+
+        /// Maximum number of works to fetch
+        #[arg(long, default_value = "25")]
+        limit: usize,
+    },
+
+    /// Add a paper to the library (by DOI/arXiv/ISBN/PMID/PMCID, web page URL and/or PDF)
     Add {
         /// Identifier: DOI (10.xxxx/..., doi.org URL), arXiv ID/URL,
-        /// ISBN-10/ISBN-13, or PubMed ID
+        /// ISBN-10/ISBN-13, PubMed ID, PMCID, or a web page URL
         identifier: Option<String>,
 
         /// PDF file to save (with an identifier: used with Zotero's
@@ -564,6 +606,28 @@ fn main() {
             })
         }
         Commands::Unfiled { count } => commands::unfiled_cmd::run_unfiled(count, json),
+        Commands::Discover {
+            query,
+            semantic,
+            cited_by,
+            references,
+            year,
+            sort,
+            not_in_library,
+            abstracts,
+            limit,
+        } => commands::discover_cmd::run_discover(commands::discover_cmd::DiscoverArgs {
+            query: query.as_deref(),
+            semantic,
+            cited_by: cited_by.as_deref(),
+            references: references.as_deref(),
+            year: year.as_deref(),
+            sort: &sort,
+            not_in_library,
+            abstracts,
+            limit,
+            json,
+        }),
         Commands::Add {
             identifier,
             pdf,

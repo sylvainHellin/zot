@@ -2,6 +2,7 @@ pub mod bibtex;
 pub mod client;
 pub mod connector;
 pub mod models;
+pub mod openalex;
 pub mod resolve;
 pub mod webapi;
 pub mod webpage;

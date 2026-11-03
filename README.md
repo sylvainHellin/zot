@@ -74,6 +74,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot index issues` | List every item whose fulltext extraction has a problem (key, title, status, reason). |
 | `zot search <query>` | Hybrid semantic search (BM25 plus vector) over the local index. Warns if the index is out of sync with Zotero; `--no-sync-check` skips the check. |
 | `zot find <query>` | Live keyword search via the Zotero local API, always in sync and requiring no index. |
+| `zot discover [query]` | Find literature outside the library in OpenAlex: keyword or `--semantic` search, `--cited-by REF` and `--references REF` for citation chaining, each hit marked with its library key and collections when the library already holds it. |
 | `zot get <key>` | Full metadata for an item. |
 | `zot fulltext <key>` | Stored fulltext for an item, from the local index. `--start`, `--end`, and `--max-chars` return a slice. |
 | `zot pdf <key>` | Local file path of an item's PDF attachment. |
@@ -252,8 +253,34 @@ Behavior worth knowing:
   The warning is stderr only, so `--json` stdout stays a single document, where the same fact reads as `collections: null`; that key is always serialised, so a strict consumer can test it.
 - Index refresh: after a successful add, the search index updates incrementally so the paper is immediately findable via `zot search`.
 - No local delete: the connector API cannot remove items, so a mistaken add must be undone with `zot rm` (web API) or in the Zotero UI.
-- Adding by plain URL is on the roadmap as Plane issue PERSO-196; it needs Zotero's web translators, which the connector API does not expose.
 - With the desktop app closed, `zot add` creates the item through the web API instead (see the next section).
+
+## Discovering literature (`zot discover`)
+
+`zot discover` searches [OpenAlex](https://openalex.org) for works the library may not hold yet, and checks every hit against the whole library.
+
+```bash
+zot discover "information retrieval construction documents"   # keyword search
+zot discover "LLMs extracting data from drawings" --semantic  # by meaning, at most 50 hits
+zot discover --cited-by 9PZYCV75             # works citing a library item (forward chaining)
+zot discover --references "10.1061/(asce)me.1943-5479.0000341" # works it cites (backward)
+zot discover --cited-by arXiv:1706.03762 "construction"         # citing works, narrowed by keyword
+zot discover ... --year 2020-                # 2021, 2018-2024, 2020- (from), -2020 (until)
+zot discover ... --sort cited                # relevance (default), cited or newest
+zot discover ... --not-in-library            # leave out what the library holds
+zot discover ... --abstracts --limit 100     # abstracts in the listing; up to 1000 works
+```
+
+Behavior worth knowing:
+
+- A seed for `--cited-by` or `--references` is a Zotero item key, DOI, arXiv ID, PMID, PMCID or OpenAlex work ID (`W...`); an item key resolves through the item's DOI, else its arXiv ID or PMID.
+- Library matching goes by DOI, arXiv ID or PMID first and by normalised title last; a title match is flagged, since it can be another version of the work (a preprint of the published paper).
+  Each match lists the item's key and its collection paths, or `unfiled`.
+- `--json` adds the abstract of every hit, rebuilt from OpenAlex's inverted index, and the request's cost.
+- A semantic search embeds the query with OpenAlex's model (GTE Large, titles and abstracts only), takes up to 2,000 characters, returns at most 50 works and cannot be re-sorted.
+- Cost: a list costs $0.0001 and a search $0.001 against the free key's $1 daily budget, and the seed lookup is free; every run prints what it spent.
+  The key is read from `OPENALEX_API_KEY`, else `~/.config/openalex/key`, and sent as a bearer header; without one the API answers on a tenth of the budget.
+- OpenAlex's reference coverage is comparable to Scopus and Web of Science, but no single index is complete; confirm a negative in Scopus before claiming a gap.
 
 ## Without the desktop app
 
@@ -522,6 +549,7 @@ The local index is stored in the platform data directory, `~/Library/Application
 ```
 
 The web API key and the controlled tag vocabulary live in the platform config directory, the same directory on macOS and `~/.config/zot/config.json` on Linux.
+The OpenAlex key for `zot discover` lives in `~/.config/openalex/key` (or `OPENALEX_API_KEY`).
 
 To reset the index completely, delete the data directory or run `zot index --force`.
 
@@ -534,6 +562,7 @@ To reset the index completely, delete the data directory or run `zot index --for
 ## Open work
 
 Open work (bugs and features) is tracked in Sylvain's self-hosted Plane, project Personal (`PERSO`), module Technical Leverage, with issue titles prefixed `zot:`.
+Features driven by the PhD literature work can sit in the TUM workspace's Research project (`RES`) instead, such as RES-140 for `zot discover`, so check both.
 Commit messages cite the Plane identifier, for example PERSO-196.
 
 ## License
