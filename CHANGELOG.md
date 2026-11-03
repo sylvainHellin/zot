@@ -22,7 +22,7 @@ Notable changes per release. Dates are release dates.
 - Tag type is read from `meta.type`, where the API actually puts it on `/tags`, so automatic tags are no longer indistinguishable from manual ones.
 - `zot tags --rename` checks its item list against api.zotero.org before asking, and sweeps the old tag only once the server agrees nothing carries it, so an item tagged on another device cannot be silently stripped instead of renamed.
 - `--contains` is rejected with `--purge-automatic` and `--rename` instead of being silently ignored by them.
-- Web API requests honour `Backoff` and retry on `429`/`503` with `Retry-After` instead of failing on a throttled response.
+- Web API requests honour `Backoff` and retry on `429`/`503` with `Retry-After` instead of failing on a throttled response. This now covers every request to api.zotero.org, item and collection creation, collection reads and deletes and the upload handshake included, so a throttled `zot add`, `zot attach` or `zot annotate` retries instead of failing. Creating POSTs carry a `Zotero-Write-Token`, so a retry can never create the same object twice.
 
 ## v0.4.0 (2026-09-17)
 

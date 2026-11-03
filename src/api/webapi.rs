@@ -31,6 +31,9 @@ pub struct WebApiClient {
     client: Client,
     api_key: String,
     user_id: u64,
+    /// [`WEB_API_BASE`] in use; a field so the tests can point the client at a
+    /// local stub server.
+    base: String,
 }
 
 /// A write refused by `If-Unmodified-Since-Version`: the object changed
@@ -124,6 +127,7 @@ impl WebApiClient {
             client,
             api_key,
             user_id,
+            base: WEB_API_BASE.to_string(),
         })
     }
 
@@ -132,7 +136,7 @@ impl WebApiClient {
     /// it is the same on both, which is what lets `ZoteroClient` swap one for
     /// the other.
     pub fn library_base(&self) -> String {
-        format!("{WEB_API_BASE}/users/{}", self.user_id)
+        format!("{}/users/{}", self.base, self.user_id)
     }
 
     /// Authenticated GET of an absolute URL, honouring throttling like every
@@ -175,15 +179,15 @@ impl WebApiClient {
     }
 
     fn items_url(&self, suffix: &str) -> String {
-        format!("{WEB_API_BASE}/users/{}/items{}", self.user_id, suffix)
+        format!("{}/items{suffix}", self.library_base())
     }
 
     fn collections_url(&self, suffix: &str) -> String {
-        format!("{WEB_API_BASE}/users/{}/collections{suffix}", self.user_id)
+        format!("{}/collections{suffix}", self.library_base())
     }
 
     fn tags_url(&self, suffix: &str) -> String {
-        format!("{WEB_API_BASE}/users/{}/tags{suffix}", self.user_id)
+        format!("{}/tags{suffix}", self.library_base())
     }
 
     fn auth(&self, req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
@@ -200,6 +204,12 @@ impl WebApiClient {
     /// sleeping before the response is handed back, the second by retrying the
     /// same request. `build` is a closure rather than a request because a
     /// retried request has to be constructed again from scratch.
+    ///
+    /// Every request to api.zotero.org goes through here, writes included: a
+    /// throttled write did not happen, so sending it again is safe. Creating
+    /// POSTs also carry a `Zotero-Write-Token` (see [`write_token`]), which
+    /// keeps even a retry of a request the server did process from creating
+    /// the object twice.
     fn send_retrying(
         &self,
         build: impl Fn() -> reqwest::blocking::RequestBuilder,
@@ -331,10 +341,7 @@ impl WebApiClient {
     /// `Err`, so such a caller gives up on them immediately.
     pub fn get_item_opt(&self, key: &str) -> Result<Option<Value>> {
         let url = self.items_url(&format!("/{key}"));
-        let resp = self
-            .auth(self.client.get(&url))
-            .send()
-            .context("Failed to fetch item from web API")?;
+        let resp = self.send_retrying(|| self.auth(self.client.get(&url)))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -402,7 +409,8 @@ impl WebApiClient {
     /// (`GET /items/new`, no library or key needed).
     pub fn item_template(&self, item_type: &str) -> Result<Value> {
         let url = format!(
-            "{WEB_API_BASE}/items/new?itemType={}",
+            "{}/items/new?itemType={}",
+            self.base,
             urlencoding::encode(item_type)
         );
         let resp = self.get_url(&url)?;
@@ -430,14 +438,23 @@ impl WebApiClient {
     /// Create items (POST). Returns the response JSON (`successful` map etc.).
     pub fn create_items(&self, items: &Value) -> Result<Value> {
         let url = self.items_url("");
-        let resp = self
-            .auth(self.client.post(&url))
-            .header("Content-Type", "application/json")
-            .body(items.to_string())
-            .send()
-            .context("Failed to POST items")?;
+        let body = items.to_string();
+        let token = write_token();
+        let resp = self.send_retrying(|| {
+            self.auth(self.client.post(&url))
+                .header("Content-Type", "application/json")
+                .header("Zotero-Write-Token", &token)
+                .body(body.clone())
+        })?;
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            bail!(
+                "api.zotero.org had already processed this item creation (write token reused), \
+                 so it was not written a second time.\n  An earlier attempt went through: check \
+                 the library for the new item before re-running."
+            );
+        }
         if !status.is_success() {
             bail!(
                 "Web API item creation failed (status {status}): {}",
@@ -470,14 +487,24 @@ impl WebApiClient {
                 None => json!(false),
             },
         }]);
-        let resp = self
-            .auth(self.client.post(self.collections_url("")))
-            .header("Content-Type", "application/json")
-            .body(body.to_string())
-            .send()
-            .context("Failed to POST collection")?;
+        let url = self.collections_url("");
+        let body = body.to_string();
+        let token = write_token();
+        let resp = self.send_retrying(|| {
+            self.auth(self.client.post(&url))
+                .header("Content-Type", "application/json")
+                .header("Zotero-Write-Token", &token)
+                .body(body.clone())
+        })?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            bail!(
+                "api.zotero.org had already processed this collection creation (write token \
+                 reused), so it was not written a second time.\n  An earlier attempt went \
+                 through: check the collection tree before re-running."
+            );
+        }
         if !status.is_success() {
             bail!(
                 "Web API collection creation failed (status {status}): {}",
@@ -495,10 +522,8 @@ impl WebApiClient {
     /// the same number, and the top-level one is read here because it is
     /// present even on responses that omit `data`.
     pub fn get_collection(&self, key: &str) -> Result<Value> {
-        let resp = self
-            .auth(self.client.get(self.collections_url(&format!("/{key}"))))
-            .send()
-            .context("Failed to fetch collection from web API")?;
+        let url = self.collections_url(&format!("/{key}"));
+        let resp = self.send_retrying(|| self.auth(self.client.get(&url)))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             bail!(
                 "Collection {key} not found on api.zotero.org.\n  \
@@ -531,14 +556,13 @@ impl WebApiClient {
     /// version, not the parent's; `meta.numCollections` is the field that
     /// reports a subcollection the caller never saw.
     pub fn delete_collection(&self, key: &str, if_unmodified_version: u64) -> Result<()> {
-        let resp = self
-            .auth(self.client.delete(self.collections_url(&format!("/{key}"))))
-            .header(
+        let url = self.collections_url(&format!("/{key}"));
+        let resp = self.send_retrying(|| {
+            self.auth(self.client.delete(&url)).header(
                 "If-Unmodified-Since-Version",
                 if_unmodified_version.to_string(),
             )
-            .send()
-            .context("Failed to DELETE collection")?;
+        })?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
@@ -584,13 +608,12 @@ impl WebApiClient {
             bytes.len(),
             mtime_ms,
         );
-        let resp = self
-            .auth(self.client.post(&url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("If-None-Match", "*")
-            .body(form)
-            .send()
-            .context("Failed to authorize upload")?;
+        let resp = self.send_retrying(|| {
+            self.auth(self.client.post(&url))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("If-None-Match", "*")
+                .body(form.clone())
+        })?;
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         if !status.is_success() {
@@ -635,13 +658,13 @@ impl WebApiClient {
             .get("uploadKey")
             .and_then(|k| k.as_str())
             .context("No uploadKey in authorization")?;
-        let resp = self
-            .auth(self.client.post(&url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("If-None-Match", "*")
-            .body(format!("upload={upload_key}"))
-            .send()
-            .context("Failed to register upload")?;
+        let register = format!("upload={upload_key}");
+        let resp = self.send_retrying(|| {
+            self.auth(self.client.post(&url))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("If-None-Match", "*")
+                .body(register.clone())
+        })?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();
@@ -719,10 +742,138 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A fresh `Zotero-Write-Token`: 32 hex characters, unique per write.
+///
+/// The server remembers a token for twelve hours and answers a second request
+/// carrying it with 412 instead of writing again, which is what makes resending
+/// a creating POST safe. Uniqueness is all that matters, so an MD5 over the
+/// clock, the process ID and a counter does the job without a random-number
+/// dependency.
+fn write_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seed = format!(
+        "{nanos}-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    hex(&Md5::digest(seed.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{created_collection_key, encode_tag_list};
+    use super::{created_collection_key, encode_tag_list, write_token, WebApiClient};
+    use reqwest::blocking::Client;
     use serde_json::json;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// A one-shot HTTP stub on localhost: it answers the given raw responses in
+    /// order, one connection each, and records the head of every request it
+    /// received. Returns the base URL and the recorded request heads.
+    fn stub_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for response in responses {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).unwrap();
+                log.lock().unwrap().push(head);
+                reader.get_mut().write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (base, seen)
+    }
+
+    fn stub_client(base: String) -> WebApiClient {
+        WebApiClient {
+            client: Client::new(),
+            api_key: "test-key".to_string(),
+            user_id: 1,
+            base,
+        }
+    }
+
+    /// A raw HTTP/1.1 response that closes its connection, so every request
+    /// the client sends arrives on a fresh one.
+    fn response(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// `Retry-After: 1` keeps the test at one second of sleeping.
+    fn throttled() -> String {
+        response("429 Too Many Requests", "Retry-After: 1\r\n", "")
+    }
+
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case(name).then(|| v.trim())
+        })
+    }
+
+    #[test]
+    fn a_throttled_item_creation_is_retried_with_the_same_write_token() {
+        let ok = response(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            r#"{"success":{"0":"ABCD1234"},"failed":{}}"#,
+        );
+        let (base, seen) = stub_server(vec![throttled(), ok]);
+        let key = stub_client(base)
+            .create_item(&json!({ "itemType": "note" }))
+            .unwrap();
+        assert_eq!(key, "ABCD1234");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one throttled POST, one retry");
+        let tokens: Vec<_> = seen
+            .iter()
+            .map(|h| header(h, "Zotero-Write-Token").unwrap())
+            .collect();
+        assert_eq!(tokens[0].len(), 32);
+        assert_eq!(tokens[0], tokens[1]);
+    }
+
+    #[test]
+    fn a_reused_write_token_is_reported_as_an_earlier_success() {
+        let refused = response("412 Precondition Failed", "", "");
+        let (base, _) = stub_server(vec![throttled(), refused]);
+        let err = stub_client(base)
+            .create_items(&json!([{ "itemType": "note" }]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already processed"), "{err}");
+    }
+
+    #[test]
+    fn write_tokens_are_unique() {
+        assert_ne!(write_token(), write_token());
+    }
 
     #[test]
     fn encode_tag_list_keeps_the_separator_literal_and_encodes_the_tags() {
