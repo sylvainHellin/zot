@@ -1,7 +1,7 @@
 # zot
 
 A CLI for querying and maintaining your local [Zotero](https://www.zotero.org/) library.
-It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv/ISBN/PubMed ID or PDF, edit metadata, attach files, highlight PDF passages, and trash items.
+It offers hybrid semantic search (BM25 keyword plus vector embeddings, with an optional reranker) and write commands to add papers by DOI/arXiv/ISBN/PubMed ID/PMCID, web page URL or PDF, edit metadata, attach files, highlight PDF passages, and trash items.
 
 `zot` reads through the Zotero local HTTP API (the desktop app's built-in server at `http://localhost:23119`) whenever the app is running, since that is fastest and needs no key.
 When the app is closed it falls back to the Zotero web API (api.zotero.org) with the key from `zot config set-key`, so every command also works on a machine where the app is not open (see [Without the desktop app](#without-the-desktop-app)).
@@ -60,7 +60,7 @@ zot search "diffusion models for point clouds"
 # 3. Live keyword search straight from Zotero (no index needed)
 zot find "kalman filter" --everything
 
-# 4. Add a paper by DOI, arXiv ID, ISBN or PubMed ID (also refreshes the index)
+# 4. Add a paper by DOI, arXiv ID, ISBN, PubMed ID, PMCID or URL (also refreshes the index)
 zot add 10.1145/361598.361623 --tag to-read
 zot add arXiv:2401.12345 --collection "Large Language Models"
 zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
@@ -82,7 +82,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot collections [ref]` | List the collection tree with direct and subtree item counts. `--flat` drops the indentation, `--tree-ids` shows connector IDs, and a key, exact name, or tree-view ID limits the listing to one subtree. `--create NAME` creates a collection instead, under `--parent <ref>` or at the top level (web API plus sync). `--rm <ref>` permanently deletes one and every subcollection under it, after a typed confirmation (`--force` skips it); the items in it are unfiled, not deleted. |
 | `zot unfiled` | List top-level items that are in no collection; `--count` prints the bare number of them. |
 | `zot export <key>...` | Export items as a bibliography rendered by Zotero. `--collection <ref>` exports a whole collection instead, `--format bibtex\|ris\|csljson` picks the format, `--output PATH` writes a file, `--raw` keeps the private BibTeX fields. |
-| `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv/ISBN/PubMed identifier and/or PDF, locally via Zotero's connector API. |
+| `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv/ISBN/PubMed/PMCID identifier or web page URL, and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
 | `zot annotate <key>` | Highlight a PDF passage found by its first and last words, with an optional comment, colour and tags (web API plus sync). `--dry-run` only locates it. |
@@ -205,6 +205,9 @@ zot add arXiv:2401.12345                    # arXiv ID (also arxiv.org URLs)
 zot add 978-0-262-03561-3                   # ISBN-10 or ISBN-13 (also ISBN:...,
                                             # hyphens and spaces optional)
 zot add 23193287                            # PubMed ID (also PMID:... / PubMed:...)
+zot add PMC3531190                          # PubMed Central ID (also PMCID:... and
+                                            # pmc.ncbi.nlm.nih.gov URLs)
+zot add https://example.org/article         # any web page (see below)
 zot add --pdf paper.pdf                     # PDF only: Zotero's recognizer
                                             # creates the metadata item
 zot add 10.1000/xyz --pdf paper.pdf         # PDF + identifier (see below)
@@ -226,6 +229,11 @@ Behavior worth knowing:
   A PubMed ID makes one NCBI `efetch` call in MEDLINE form; when the record carries a DOI the publisher's BibTeX is used instead, since it is richer, and otherwise the MEDLINE record is mapped to BibTeX directly.
   An ISBN goes to OpenLibrary (`openlibrary.org/api/books`), which answers with author names inline in a single request, and is mapped to a BibTeX `@book`.
   There is no Google Books fallback: its keyless endpoint answers 429 for everyone sharing the anonymous project, so a second lookup would only delay the error.
+  A PMCID goes through NCBI's ID converter (idconv) to the article's DOI, else its PMID, and resolves from there.
+- Web page URLs: a URL that is not a doi.org, arxiv.org or PubMed link is fetched once and read for the identifier the page names about itself (`citation_doi`, `dc.identifier`, `citation_arxiv_id`, `citation_pmid` and similar meta tags, or a DOI in the URL path), which then resolves as above.
+  A page that names none becomes an item built from its own Highwire, Dublin Core, Open Graph and JSON-LD tags: a journal article when it names a journal, a preprint when it names a repository, else a `webpage` with the access date.
+  That item is only as good as the site's tags, so `zot add` warns to check its type, authors and date.
+  Publishers that refuse non-browser clients (403, a bot-check page) are reported as such; pass the article's DOI instead.
 - Duplicate guard: before adding, the identifier is checked against the library (DOI, URL, extra fields).
   If it matches, the add is refused and reports the existing item's key; `--force` overrides.
   An ISBN is checked differently, because Zotero stores it hyphenated and its quicksearch does not match across the hyphens: the books are listed and their `ISBN` fields compared digit by digit, which catches a book whether it is stored hyphenated or not and whether its field holds one ISBN or the print and electronic ones together.

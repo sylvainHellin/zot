@@ -3,6 +3,9 @@
 //!
 //! Paths:
 //!   - identifier only: resolve DOI/arXiv/ISBN/PMID -> BibTeX -> `/connector/import`.
+//!     A PMCID or a web page URL is first turned into the identifier it
+//!     stands for (`resolve::canonicalize`); a page that names none is
+//!     imported from its embedded metadata.
 //!   - `--pdf` (with or without identifier): `/connector/saveStandaloneAttachment`,
 //!     then Zotero's recognizer creates the parent item. If an identifier was
 //!     given and recognition fails, fall back to importing the metadata (the
@@ -53,13 +56,22 @@ pub struct AddArgs<'a> {
 pub fn run_add(args: AddArgs) -> Result<()> {
     check_collection_flags(args.no_collection, &args.collections)?;
     if args.identifier.is_none() && args.pdf.is_none() {
-        bail!("Nothing to add: pass an identifier (DOI/arXiv/ISBN/PMID) and/or --pdf <file>.");
+        bail!(
+            "Nothing to add: pass an identifier (DOI/arXiv/ISBN/PMID/PMCID/URL) and/or \
+             --pdf <file>."
+        );
     }
 
     let local = ZoteroClient::new()?;
 
-    // Parse identifier + duplicate guard.
-    let identifier = args.identifier.map(resolve::parse_identifier).transpose()?;
+    // Parse identifier + duplicate guard. The guard runs on the canonical
+    // identifier, the one the new item will carry.
+    let identifier = args
+        .identifier
+        .map(resolve::parse_identifier)
+        .transpose()?
+        .map(resolve::canonicalize)
+        .transpose()?;
     if let Some(id) = &identifier {
         if !args.force {
             check_duplicates(&local, id)?;
@@ -116,7 +128,7 @@ pub fn run_add(args: AddArgs) -> Result<()> {
     // Snapshot versions to detect what the add created.
     let before = local.fetch_item_versions()?;
 
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = identifier.iter().filter_map(webpage_warning).collect();
     let session = ConnectorClient::new_session_id();
 
     match (&identifier, &pdf) {
@@ -290,7 +302,7 @@ fn run_add_web(
     pdf: Option<(Vec<u8>, String)>,
 ) -> Result<()> {
     let web = WebApiClient::from_config()?;
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = identifier.iter().filter_map(webpage_warning).collect();
 
     let refs = if args.collections.is_empty() {
         Vec::new()
@@ -455,6 +467,18 @@ fn run_add_web(
         }
     }
     Ok(())
+}
+
+/// The caveat on an item built from a page's own tags, which are only as good
+/// as the site that wrote them.
+fn webpage_warning(id: &Identifier) -> Option<String> {
+    match id {
+        Identifier::Webpage { url, .. } => Some(format!(
+            "{url} names no DOI, arXiv ID or PMID, so the item was built from the page's \
+             embedded metadata; check its type, authors and date."
+        )),
+        _ => None,
+    }
 }
 
 /// The paper's own identifier from the first page of a PDF: a DOI, else an

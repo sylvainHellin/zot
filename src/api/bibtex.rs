@@ -518,6 +518,8 @@ pub fn to_zotero(entry: &Entry) -> Value {
         "inbook" | "incollection" => "bookSection",
         "phdthesis" | "mastersthesis" | "thesis" => "thesis",
         "techreport" | "report" => "report",
+        // Zotero's importer maps these biblatex types to webpage too.
+        "online" | "electronic" | "www" => "webpage",
         _ => "document",
     };
 
@@ -531,7 +533,9 @@ pub fn to_zotero(entry: &Entry) -> Value {
     set("title", entry.text("title"));
     set("abstractNote", entry.text("abstract"));
     set("date", date(entry));
-    set("url", entry.text("url"));
+    // Raw, as Zotero's importer reads it: decoding LaTeX would turn a `~` in
+    // the path into a space.
+    set("url", entry.get("url").map(|u| u.trim().to_string()));
     set("DOI", entry.text("doi"));
     set("ISBN", entry.text("isbn"));
     set("ISSN", entry.text("issn"));
@@ -589,6 +593,10 @@ pub fn to_zotero(entry: &Entry) -> Value {
             set("reportNumber", entry.text("number"));
             set("reportType", entry.text("type"));
             set("pages", pages);
+        }
+        "webpage" => {
+            set("websiteTitle", entry.text("organization"));
+            set("accessDate", entry.text("urldate"));
         }
         "preprint" => {
             set("repository", Some("arXiv".to_string()));

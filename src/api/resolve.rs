@@ -1,4 +1,5 @@
-//! Resolve external identifiers (DOI, arXiv, ISBN, PMID) to BibTeX for import.
+//! Resolve external identifiers (DOI, arXiv, ISBN, PMID, PMCID, web page URL)
+//! to BibTeX for import.
 //!
 //! DOIs go through doi.org content negotiation (Crossref/DataCite/mEDRA all
 //! honor `Accept: application/x-bibtex`). arXiv IDs use arxiv.org's BibTeX
@@ -12,6 +13,14 @@
 //! not used: it only knows PMC records, so a PubMed-only PMID is
 //! indistinguishable from a nonsense one there, and efetch answers both cases
 //! in a single request.
+//!
+//! PMCIDs are the one case idconv is right for: every PMC article is in its
+//! index, so [`canonicalize`] maps a PMCID to the DOI (or else the PMID) it
+//! carries in one request, and the item is resolved from that.
+//!
+//! A plain URL is read for the metadata the page embeds (`api::webpage`); a
+//! DOI, arXiv ID or PMID found there takes over, else the page becomes a
+//! `webpage`-style entry built from its tags.
 //!
 //! ISBNs go to OpenLibrary's `/api/books?jscmd=data` endpoint, which returns
 //! author names inline; the `/isbn/<isbn>.json` form redirects to an edition
@@ -36,6 +45,17 @@ pub enum Identifier {
     /// Normalised to digits only, with an uppercase `X` check digit.
     Isbn(String),
     Pmid(String),
+    /// `PMC` followed by digits, uppercase.
+    Pmcid(String),
+    /// An http(s) URL that is none of the identifier URLs above, as typed.
+    Url(String),
+    /// A URL whose page carried no identifier, with the entry built from its
+    /// embedded metadata. Only [`canonicalize`] produces it, so the page is
+    /// fetched once however often the BibTeX is asked for.
+    Webpage {
+        url: String,
+        bibtex: String,
+    },
 }
 
 impl Identifier {
@@ -46,6 +66,8 @@ impl Identifier {
             Identifier::Arxiv(id) => id,
             Identifier::Isbn(isbn) => isbn,
             Identifier::Pmid(pmid) => pmid,
+            Identifier::Pmcid(pmcid) => pmcid,
+            Identifier::Url(url) | Identifier::Webpage { url, .. } => url,
         }
     }
 
@@ -55,14 +77,19 @@ impl Identifier {
             Identifier::Arxiv(id) => format!("arXiv:{id}"),
             Identifier::Isbn(isbn) => format!("ISBN {isbn}"),
             Identifier::Pmid(pmid) => format!("PMID {pmid}"),
+            Identifier::Pmcid(pmcid) => format!("PMCID {pmcid}"),
+            Identifier::Url(url) => url.clone(),
+            Identifier::Webpage { url, .. } => format!("web page {url}"),
         }
     }
 }
 
 /// Parse a user-supplied identifier. Accepts bare DOIs, doi.org URLs,
 /// `arXiv:ID`, bare arXiv IDs (new-style `2401.12345`), arxiv.org URLs,
-/// `ISBN:`/bare ISBN-10 and ISBN-13 (hyphenated or spaced), and
-/// `PMID:`/`PubMed:`/bare PubMed IDs.
+/// `ISBN:`/bare ISBN-10 and ISBN-13 (hyphenated or spaced),
+/// `PMID:`/`PubMed:`/bare PubMed IDs and pubmed URLs, `PMCID:`/bare PMCIDs
+/// and PMC article URLs, and finally any other http(s) URL as a web page.
+/// Only the shape is checked here; nothing is fetched.
 #[allow(
     clippy::string_slice,
     reason = "the index comes from find(\"arxiv.org/\"), an ASCII match, so it is a char boundary"
@@ -90,6 +117,15 @@ pub fn parse_identifier(input: &str) -> Result<Identifier> {
         if !id.is_empty() {
             return Ok(Identifier::Arxiv(strip_arxiv_version(id)));
         }
+    }
+    if is_web_url(s) {
+        if let Some(id) = ncbi_url_identifier(s) {
+            return Ok(id);
+        }
+        return Ok(Identifier::Url(s.to_string()));
+    }
+    if s.starts_with("www.") && !s.contains(char::is_whitespace) {
+        return Ok(Identifier::Url(format!("https://{s}")));
     }
 
     // Prefixed forms
@@ -124,6 +160,19 @@ pub fn parse_identifier(input: &str) -> Result<Identifier> {
         }
         return Ok(Identifier::Pmid(raw.to_string()));
     }
+    if let Some(rest) = lower.strip_prefix("pmcid:") {
+        let raw = rest.trim();
+        return normalize_pmcid(raw).map(Identifier::Pmcid).with_context(|| {
+            format!("Not a valid PMCID: {raw}\n  A PMCID is PMC followed by digits, e.g. PMC3531190.")
+        });
+    }
+    if let Some(pmcid) = lower
+        .starts_with("pmc")
+        .then(|| normalize_pmcid(s))
+        .flatten()
+    {
+        return Ok(Identifier::Pmcid(pmcid));
+    }
 
     // Bare forms. DOI and arXiv come first, unchanged: everything below is
     // digits-only, so neither `10.xxxx/yyy` nor `2401.12345` can reach it.
@@ -156,8 +205,8 @@ pub fn parse_identifier(input: &str) -> Result<Identifier> {
     bail!(
         "Could not recognize identifier: {input}\n  \
          Supported: DOI (10.xxxx/...), doi.org URL, arXiv ID (2401.12345), arxiv.org URL, \
-         ISBN-10/ISBN-13 (also ISBN:...), PubMed ID (also PMID:... or PubMed:...).\n  \
-         Adding by plain URL is on the roadmap.{hint}"
+         ISBN-10/ISBN-13 (also ISBN:...), PubMed ID (also PMID:... or PubMed:...), \
+         PMCID (PMC3531190), or a web page URL (https://...).{hint}"
     );
 }
 
@@ -170,6 +219,48 @@ fn looks_like_bare_isbn_shape(s: &str) -> bool {
         && s.chars()
             .enumerate()
             .all(|(i, c)| c.is_ascii_digit() || (len == 10 && i == 9 && (c == 'X' || c == 'x')))
+}
+
+fn is_web_url(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && url::Url::parse(s).is_ok_and(|u| u.host_str().is_some())
+}
+
+/// The PubMed or PMC record a PubMed or PMC article URL points at, read off
+/// the path: `pubmed.ncbi.nlm.nih.gov/<pmid>/`,
+/// `pmc.ncbi.nlm.nih.gov/articles/<pmcid>/` and the older
+/// `www.ncbi.nlm.nih.gov/pmc/articles/<pmcid>/` and `.../pubmed/<pmid>`.
+fn ncbi_url_identifier(s: &str) -> Option<Identifier> {
+    let url = url::Url::parse(s).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    if !host.ends_with("ncbi.nlm.nih.gov") {
+        return None;
+    }
+    let segments: Vec<&str> = url.path_segments()?.filter(|p| !p.is_empty()).collect();
+    let pmcid = segments
+        .windows(2)
+        .find(|w| w[0] == "articles")
+        .and_then(|w| normalize_pmcid(w[1]));
+    if let Some(pmcid) = pmcid {
+        return Some(Identifier::Pmcid(pmcid));
+    }
+    let pmid = if host.starts_with("pubmed.") {
+        segments.first().copied()
+    } else {
+        segments.windows(2).find(|w| w[0] == "pubmed").map(|w| w[1])
+    };
+    pmid.filter(|p| looks_like_pmid(p))
+        .map(|p| Identifier::Pmid(p.to_string()))
+}
+
+/// `PMC` and digits, uppercased; `None` for anything else. A bare number is
+/// not accepted, since it is a PMID.
+fn normalize_pmcid(s: &str) -> Option<String> {
+    let upper = s.trim().to_ascii_uppercase();
+    let digits = upper.strip_prefix("PMC")?;
+    (!digits.is_empty() && digits.len() <= 10 && digits.chars().all(|c| c.is_ascii_digit()))
+        .then_some(upper)
 }
 
 /// A PMID as typed: a plain number, no separators, no leading zero.
@@ -249,13 +340,147 @@ fn strip_arxiv_version(s: &str) -> String {
     s.to_string()
 }
 
-/// Fetch BibTeX for an identifier from the corresponding external service.
-pub fn fetch_bibtex(id: &Identifier) -> Result<String> {
-    let client = Client::builder()
+fn http_client() -> Result<Client> {
+    Client::builder()
         .user_agent(format!("zot/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .context("Failed to create HTTP client")?;
+        .context("Failed to create HTTP client")
+}
+
+/// Turn an identifier that only points at a record into the one the record
+/// is resolved by: a PMCID into its DOI or PMID, a URL into whatever its page
+/// names, or into a [`Identifier::Webpage`]. Every other identifier comes back
+/// unchanged and costs nothing.
+///
+/// `zot add` calls this before the duplicate check, so the check runs against
+/// the identifier the item will actually carry: an item added from a PMCID
+/// through its DOI is found again by that DOI.
+pub fn canonicalize(id: Identifier) -> Result<Identifier> {
+    match id {
+        Identifier::Pmcid(pmcid) => {
+            let resolved = resolve_pmcid(&http_client()?, &pmcid)?;
+            eprintln!("PMCID {pmcid} -> {}", resolved.display());
+            Ok(resolved)
+        }
+        Identifier::Url(url) => resolve_url(&url),
+        other => Ok(other),
+    }
+}
+
+/// The DOI of a PMC article, else its PMID, from one idconv request.
+fn resolve_pmcid(client: &Client, pmcid: &str) -> Result<Identifier> {
+    let url = format!(
+        "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/\
+         ?format=json&tool=zot&ids={}",
+        urlencoding::encode(pmcid),
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("Failed to look up PMCID {pmcid} at NCBI"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        bail!("PMC ID conversion for {pmcid} failed with status {status}");
+    }
+    let body = resp
+        .text()
+        .context("Failed to read the PMC ID conversion")?;
+    idconv_identifier(&body, pmcid)
+}
+
+/// Pick the identifier out of an idconv response. Pure: the caller does the
+/// HTTP.
+///
+/// The DOI wins over the PMID for the same reason as in
+/// [`fetch_pubmed_bibtex`]: the publisher's BibTeX is richer. An unknown PMCID
+/// is answered with 200 and a record carrying `status: error`.
+fn idconv_identifier(body: &str, pmcid: &str) -> Result<Identifier> {
+    let parsed: Value = serde_json::from_str(body)
+        .with_context(|| format!("NCBI returned unparseable JSON for PMCID {pmcid}"))?;
+    let record = parsed
+        .pointer("/records/0")
+        .with_context(|| format!("NCBI returned no record for PMCID {pmcid}"))?;
+    if record.get("status").and_then(Value::as_str) == Some("error") {
+        let message = record
+            .get("errmsg")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        bail!("PMC has no record for PMCID {pmcid}: {message}");
+    }
+    if let Some(doi) = record
+        .get("doi")
+        .and_then(Value::as_str)
+        .filter(|d| d.starts_with("10."))
+    {
+        return Ok(Identifier::Doi(doi.to_string()));
+    }
+    // The PMID comes back as a number; accept a string too.
+    let pmid = match record.get("pmid") {
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    match pmid.filter(|p| looks_like_pmid(p)) {
+        Some(pmid) => Ok(Identifier::Pmid(pmid)),
+        None => bail!(
+            "PMCID {pmcid} carries neither a DOI nor a PubMed ID, so there is no record to \
+             resolve it from."
+        ),
+    }
+}
+
+/// A page's identifier, else the page itself as a [`Identifier::Webpage`].
+///
+/// The page's own tags are read first, because they are authoritative. A DOI
+/// in the URL path (`/doi/10.1145/...`, `/article/10.1007/...`) is the
+/// fallback for a page that names none or cannot be read at all, which is
+/// common: publishers answer non-browser clients with a bot wall.
+fn resolve_url(url: &str) -> Result<Identifier> {
+    let url_doi = super::webpage::doi_in_url(url);
+    eprintln!("Reading {url} for its metadata...");
+    let page = match super::webpage::fetch(url) {
+        Ok(page) => page,
+        Err(e) => {
+            return match url_doi {
+                Some(doi) => {
+                    eprintln!("Could not read the page ({e:#}); using the DOI in its URL.");
+                    Ok(Identifier::Doi(doi))
+                }
+                None => Err(e),
+            };
+        }
+    };
+    let meta = super::webpage::PageMeta::parse(&page.html);
+    if let Some(id) = meta.identifier() {
+        eprintln!("Found {} on the page.", id.display());
+        return Ok(id);
+    }
+    if let Some(doi) = url_doi {
+        eprintln!("Found DOI {doi} in the URL.");
+        return Ok(Identifier::Doi(doi));
+    }
+    // A redirect can land on an identifier URL (a short link to arxiv.org).
+    if page.final_url != url {
+        if let Ok(id @ (Identifier::Doi(_) | Identifier::Arxiv(_) | Identifier::Pmid(_))) =
+            parse_identifier(&page.final_url)
+        {
+            return Ok(id);
+        }
+        if let Ok(Identifier::Pmcid(pmcid)) = parse_identifier(&page.final_url) {
+            return canonicalize(Identifier::Pmcid(pmcid));
+        }
+    }
+    let bibtex = meta.to_bibtex(&page.final_url, &super::webpage::today())?;
+    Ok(Identifier::Webpage {
+        url: page.final_url,
+        bibtex,
+    })
+}
+
+/// Fetch BibTeX for an identifier from the corresponding external service.
+pub fn fetch_bibtex(id: &Identifier) -> Result<String> {
+    let client = http_client()?;
 
     match id {
         Identifier::Doi(doi) => fetch_doi_bibtex(&client, doi),
@@ -269,6 +494,8 @@ pub fn fetch_bibtex(id: &Identifier) -> Result<String> {
         }
         Identifier::Isbn(isbn) => fetch_isbn_bibtex(&client, isbn),
         Identifier::Pmid(pmid) => fetch_pubmed_bibtex(&client, pmid),
+        Identifier::Webpage { bibtex, .. } => Ok(bibtex.clone()),
+        Identifier::Pmcid(_) | Identifier::Url(_) => fetch_bibtex(&canonicalize(id.clone())?),
     }
 }
 
@@ -564,7 +791,12 @@ fn find_year(s: &str) -> Option<String> {
 /// `lastnameYEARword`, restricted to ASCII alphanumerics so the key is always a
 /// legal BibTeX citation key. Falls back to the identifier when the record has
 /// no author, since a key is mandatory and `@book{,` does not parse.
-fn citekey(first_author: Option<&str>, year: Option<&str>, title: &str, fallback: &str) -> String {
+pub(crate) fn citekey(
+    first_author: Option<&str>,
+    year: Option<&str>,
+    title: &str,
+    fallback: &str,
+) -> String {
     let ascii = |s: &str| -> String {
         s.chars()
             .filter(char::is_ascii_alphanumeric)
@@ -595,13 +827,28 @@ fn citekey(first_author: Option<&str>, year: Option<&str>, title: &str, fallback
 
 /// Render a BibTeX entry in the shape Zotero's importer expects: a citation
 /// key, then one TAB-indented `field = {value},` per line.
-fn bibtex_entry(kind: &str, key: &str, fields: &[(&str, String)]) -> String {
+///
+/// `url` is written verbatim, because Zotero's importer and `api::bibtex` both
+/// read it raw: escaping the `_` or `%` of a URL would put a backslash into
+/// the stored link. Only the braces and whitespace that would break the field
+/// are percent-encoded, which leaves the URL equivalent.
+pub(crate) fn bibtex_entry(kind: &str, key: &str, fields: &[(&str, String)]) -> String {
     let mut out = format!("@{kind}{{{key},\n");
     for (name, value) in fields {
         out.push('\t');
         out.push_str(name);
         out.push_str(" = {");
-        out.push_str(&bibtex_escape(value));
+        if *name == "url" {
+            out.push_str(
+                &value
+                    .trim()
+                    .replace('{', "%7B")
+                    .replace('}', "%7D")
+                    .replace(' ', "%20"),
+            );
+        } else {
+            out.push_str(&bibtex_escape(value));
+        }
         out.push_str("},\n");
     }
     out.push_str("}\n");
@@ -882,6 +1129,74 @@ mod tests {
         // Nothing ISBN-shaped, so no hint about check digits.
         let err = parse_identifier("not-an-id").unwrap_err().to_string();
         assert!(!err.contains("check digit"), "{err}");
+    }
+
+    #[test]
+    fn pmcids_and_urls_parse_without_a_request() {
+        for input in [
+            "PMC3531190",
+            "pmc3531190",
+            "PMCID: PMC3531190",
+            "https://pmc.ncbi.nlm.nih.gov/articles/PMC3531190/",
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190",
+        ] {
+            assert_eq!(
+                parse_identifier(input).unwrap(),
+                Identifier::Pmcid("PMC3531190".into()),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            parse_identifier("https://pubmed.ncbi.nlm.nih.gov/23193287/").unwrap(),
+            Identifier::Pmid("23193287".into())
+        );
+        assert_eq!(
+            parse_identifier("https://www.itcon.org/paper/2021/5").unwrap(),
+            Identifier::Url("https://www.itcon.org/paper/2021/5".into())
+        );
+        assert_eq!(
+            parse_identifier("www.example.com/post").unwrap(),
+            Identifier::Url("https://www.example.com/post".into())
+        );
+        // Identifier URLs keep their own meaning.
+        assert_eq!(
+            parse_identifier("https://doi.org/10.1/x").unwrap(),
+            Identifier::Doi("10.1/x".into())
+        );
+        assert_eq!(
+            parse_identifier("https://arxiv.org/abs/2401.12345").unwrap(),
+            Identifier::Arxiv("2401.12345".into())
+        );
+        assert!(parse_identifier("PMCID:12345").is_err());
+        assert!(parse_identifier("PMC").is_err());
+    }
+
+    /// Captured from pmc.ncbi.nlm.nih.gov idconv on 2026-11-03.
+    #[test]
+    fn an_idconv_record_prefers_the_doi_and_reports_an_unknown_pmcid() {
+        let found = r#"{"status":"ok","records":[{"doi":"10.1093/nar/gks1195",
+            "pmcid":"PMC3531190","pmid":23193287,"requested-id":"PMC3531190"}]}"#;
+        assert_eq!(
+            idconv_identifier(found, "PMC3531190").unwrap(),
+            Identifier::Doi("10.1093/nar/gks1195".into())
+        );
+        let no_doi = r#"{"records":[{"pmcid":"PMC1","pmid":123}]}"#;
+        assert_eq!(
+            idconv_identifier(no_doi, "PMC1").unwrap(),
+            Identifier::Pmid("123".into())
+        );
+        let missing = r#"{"status":"ok","records":[{"pmcid":"PMC99999999",
+            "status":"error","errmsg":"Identifier not found in PMC"}]}"#;
+        let err = idconv_identifier(missing, "PMC99999999")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Identifier not found in PMC"), "{err}");
+    }
+
+    #[test]
+    fn a_url_with_an_underscore_is_written_raw() {
+        let bib = bibtex_entry("online", "k", &[("url", "https://x.org/a_b%20c".into())]);
+        assert!(bib.contains("url = {https://x.org/a_b%20c}"), "{bib}");
     }
 
     #[test]
