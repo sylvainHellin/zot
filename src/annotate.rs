@@ -65,6 +65,9 @@ struct Token {
     norm: String,
     first_word: usize,
     last_word: usize,
+    /// A line number printed in the margin (see [`gutter_numbers`]), which a
+    /// query may step over.
+    gutter: bool,
 }
 
 /// A located passage on one page.
@@ -122,31 +125,59 @@ fn ends_with_hyphen(text: &str) -> bool {
     ) && chars.next().is_some()
 }
 
-/// Whether word `i` is hyphenated at the end of its line and continues on the
-/// next line of the same block, so the two read as one word.
-fn joins_next(words: &[PdfWord], i: usize) -> bool {
-    let (Some(w), Some(next)) = (words.get(i), words.get(i + 1)) else {
-        return false;
-    };
-    ends_with_hyphen(&w.text) && next.line != w.line && next.block == w.block
+/// Which words are line numbers printed in the margin, as in a manuscript
+/// set for review: a word of digits only that opens its line and is either
+/// alone on it or set off from the next word by more than its own height,
+/// far wider than a word space. Poppler reads such a number as the first
+/// word of the text line beside it, so it lands between the words of a
+/// sentence that wraps.
+fn gutter_numbers(words: &[PdfWord]) -> Vec<bool> {
+    (0..words.len())
+        .map(|i| {
+            let w = &words[i];
+            let digits = !w.text.is_empty() && w.text.chars().all(|c| c.is_ascii_digit());
+            let opens_line = i == 0 || words[i - 1].line != w.line;
+            let set_off = match words.get(i + 1) {
+                Some(next) if next.line == w.line => {
+                    next.bbox[0] - w.bbox[2] > w.bbox[3] - w.bbox[1]
+                }
+                _ => true,
+            };
+            digits && opens_line && set_off
+        })
+        .collect()
+}
+
+/// If word `i` is hyphenated at the end of its line and continues on the next
+/// line of the same block, so the two read as one word, the index of that
+/// continuation (margin line numbers in between are passed over).
+fn joins_next(words: &[PdfWord], gutter: &[bool], i: usize) -> Option<usize> {
+    let w = words.get(i)?;
+    let mut j = i + 1;
+    while gutter.get(j) == Some(&true) {
+        j += 1;
+    }
+    let next = words.get(j)?;
+    (ends_with_hyphen(&w.text) && next.line != w.line && next.block == w.block).then_some(j)
 }
 
 /// Tokenise a page. Words that normalize to nothing (a lone dash, a bullet)
 /// are skipped, so the query need not reproduce them.
-fn page_tokens(words: &[PdfWord]) -> Vec<Token> {
+fn page_tokens(words: &[PdfWord], gutter: &[bool]) -> Vec<Token> {
     let mut tokens = Vec::with_capacity(words.len());
     let mut i = 0;
     while i < words.len() {
-        if joins_next(words, i) {
-            let norm = normalize(&words[i].text) + &normalize(&words[i + 1].text);
+        if let Some(j) = joins_next(words, gutter, i) {
+            let norm = normalize(&words[i].text) + &normalize(&words[j].text);
             if !norm.is_empty() {
                 tokens.push(Token {
                     norm,
                     first_word: i,
-                    last_word: i + 1,
+                    last_word: j,
+                    gutter: false,
                 });
             }
-            i += 2;
+            i = j + 1;
             continue;
         }
         let norm = normalize(&words[i].text);
@@ -155,6 +186,7 @@ fn page_tokens(words: &[PdfWord]) -> Vec<Token> {
                 norm,
                 first_word: i,
                 last_word: i,
+                gutter: gutter[i],
             });
         }
         i += 1;
@@ -175,26 +207,42 @@ const MAX_JOIN: usize = 3;
 /// as one word. So up to [`MAX_JOIN`] consecutive tokens on either side may
 /// stand for one on the other, provided their concatenation is equal. Each
 /// branch needs an exact string equality, so the backtracking stays tiny.
-fn match_at(tokens: &[Token], at: usize, query: &[String]) -> Option<usize> {
+///
+/// Once the match has `started`, a margin line number the query does not
+/// spell is stepped over, since a reader copying the sentence leaves it out.
+fn match_at(tokens: &[Token], at: usize, query: &[String], started: bool) -> Option<usize> {
     let Some(q) = query.first() else {
         return Some(at);
     };
-    let t = &tokens.get(at)?.norm;
+    let token = tokens.get(at)?;
+    let t = &token.norm;
     if t == q {
-        if let Some(end) = match_at(tokens, at + 1, &query[1..]) {
+        if let Some(end) = match_at(tokens, at + 1, &query[1..], true) {
             return Some(end);
         }
     }
-    // Several page tokens spell one query token.
+    if started && token.gutter {
+        if let Some(end) = match_at(tokens, at + 1, query, true) {
+            return Some(end);
+        }
+    }
+    // Several page tokens spell one query token (a word hyphenated across a
+    // line break that poppler did not join comes apart this way too, its
+    // margin line number in between passed over).
     if q.starts_with(t.as_str()) {
         let mut acc = t.clone();
-        for k in 1..MAX_JOIN {
-            let Some(next) = tokens.get(at + k) else {
+        let mut next_at = at + 1;
+        for _ in 1..MAX_JOIN {
+            while tokens.get(next_at).is_some_and(|n| n.gutter) {
+                next_at += 1;
+            }
+            let Some(next) = tokens.get(next_at) else {
                 break;
             };
             acc.push_str(&next.norm);
+            next_at += 1;
             if &acc == q {
-                if let Some(end) = match_at(tokens, at + k + 1, &query[1..]) {
+                if let Some(end) = match_at(tokens, next_at, &query[1..], true) {
                     return Some(end);
                 }
             }
@@ -209,7 +257,7 @@ fn match_at(tokens: &[Token], at: usize, query: &[String]) -> Option<usize> {
         for k in 1..MAX_JOIN.min(query.len()) {
             acc.push_str(&query[k]);
             if &acc == t {
-                if let Some(end) = match_at(tokens, at + 1, &query[k + 1..]) {
+                if let Some(end) = match_at(tokens, at + 1, &query[k + 1..], true) {
                     return Some(end);
                 }
             }
@@ -228,20 +276,21 @@ fn match_at(tokens: &[Token], at: usize, query: &[String]) -> Option<usize> {
 /// `from` with no `to` in reach is skipped rather than failing the search.
 fn find_on_page(
     words: &[PdfWord],
+    gutter: &[bool],
     from: &[String],
     to: &[String],
     window: usize,
 ) -> (Option<(usize, usize)>, bool) {
-    let tokens = page_tokens(words);
+    let tokens = page_tokens(words, gutter);
     let mut from_seen = false;
     for i in 0..tokens.len() {
-        let Some(from_end) = match_at(&tokens, i, from) else {
+        let Some(from_end) = match_at(&tokens, i, from, false) else {
             continue;
         };
         from_seen = true;
         let limit = (i + window).min(tokens.len());
         for j in i..limit {
-            if let Some(to_end) = match_at(&tokens, j, to) {
+            if let Some(to_end) = match_at(&tokens, j, to, false) {
                 let end = to_end.max(from_end) - 1;
                 return (Some((tokens[i].first_word, tokens[end].last_word)), true);
             }
@@ -271,23 +320,30 @@ pub fn merge_line_rects(words: &[PdfWord]) -> Vec<[f64; 4]> {
 }
 
 /// The passage text: words joined by spaces, a line-break hyphenation joined
-/// back without its hyphen.
-fn passage_text(words: &[PdfWord], first: usize, last: usize) -> String {
-    let mut text = String::new();
+/// back without its hyphen, margin line numbers left out.
+fn passage_text(words: &[PdfWord], gutter: &[bool], first: usize, last: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut glue = false;
     for i in first..=last {
+        if gutter[i] {
+            continue;
+        }
         let w = &words[i].text;
-        if i < last && joins_next(words, i) {
+        let hyphenated = i < last && joins_next(words, gutter, i).is_some_and(|j| j <= last);
+        let piece = if hyphenated {
             let mut chars = w.chars();
             chars.next_back();
-            text.push_str(chars.as_str());
+            chars.as_str().to_string()
         } else {
-            text.push_str(w);
-            if i < last {
-                text.push(' ');
-            }
+            w.clone()
+        };
+        match parts.last_mut() {
+            Some(prev) if glue => prev.push_str(&piece),
+            _ => parts.push(piece),
         }
+        glue = hyphenated;
     }
-    text
+    parts.join(" ")
 }
 
 /// Locate a passage by its first and last words.
@@ -316,19 +372,24 @@ pub fn locate(
         .iter()
         .filter(|p| page.is_none_or(|want| p.index == want))
     {
-        let (found, from_seen) = find_on_page(&p.words, &from_q, &to_q, window);
+        let gutter = gutter_numbers(&p.words);
+        let (found, from_seen) = find_on_page(&p.words, &gutter, &from_q, &to_q, window);
         if let Some((first, last)) = found {
             let char_offset = p.words[..first]
                 .iter()
                 .map(|w| w.text.chars().count() + 1)
                 .sum();
+            let text_words: Vec<PdfWord> = (first..=last)
+                .filter(|&i| !gutter[i])
+                .map(|i| p.words[i].clone())
+                .collect();
             return Ok(Passage {
                 page_index: p.index,
                 first_word: first,
                 last_word: last,
-                text: passage_text(&p.words, first, last),
+                text: passage_text(&p.words, &gutter, first, last),
                 char_offset,
-                device_rects: merge_line_rects(&p.words[first..=last]),
+                device_rects: merge_line_rects(&text_words),
             });
         }
         if from_seen {
@@ -908,6 +969,66 @@ mod tests {
         assert_eq!((p.first_word, p.last_word), (5, 6));
         // A mere prefix is no match.
         assert!(locate(pages, "Kern3 1Virt", "vendors", TO_WINDOW, None).is_err());
+    }
+
+    #[test]
+    fn match_steps_over_margin_line_numbers() {
+        // A review manuscript: each line opens with its number in the margin,
+        // poppler reads it as the first word of the line, and one line is
+        // empty but for its number.
+        let words = vec![
+            word("586", 10.0, 100.0, 1, 1),
+            word("semantic", 40.0, 100.0, 1, 1),
+            word("Faithfulness", 100.0, 100.0, 1, 1),
+            word("587", 10.0, 112.0, 1, 2),
+            word("measures", 40.0, 112.0, 1, 2),
+            word("how", 92.0, 112.0, 1, 2),
+            word("non-", 115.0, 112.0, 1, 2),
+            word("588", 10.0, 124.0, 1, 3),
+            word("589", 10.0, 136.0, 1, 4),
+            word("specialist", 40.0, 136.0, 1, 4),
+            word("users", 104.0, 136.0, 1, 4),
+            word("5", 40.0, 148.0, 1, 5),
+            word("indicated", 49.0, 148.0, 1, 5),
+        ];
+        assert_eq!(
+            gutter_numbers(&words),
+            [
+                true, false, false, true, false, false, false, true, true, false, false, false,
+                false
+            ]
+        );
+        let page = PdfPage { index: 0, words };
+        let pages = std::slice::from_ref(&page);
+        let p = locate(pages, "Faithfulness measures how", "users", TO_WINDOW, None).unwrap();
+        assert_eq!((p.first_word, p.last_word), (2, 10));
+        assert_eq!(p.text, "Faithfulness measures how nonspecialist users");
+        // The margin numbers stay out of the highlight boxes.
+        assert!(
+            p.device_rects.iter().all(|r| r[0] >= 40.0),
+            "{:?}",
+            p.device_rects
+        );
+        // Double spacing puts the continuation of a hyphenated word in a new
+        // paragraph, so it is not joined, and the query still bridges it.
+        let mut spaced = page.clone();
+        for w in spaced.words.iter_mut().filter(|w| w.line >= 4) {
+            w.block = 2;
+        }
+        let p = locate(
+            &[spaced],
+            "how non-specialist users",
+            "users",
+            TO_WINDOW,
+            None,
+        )
+        .unwrap();
+        assert_eq!((p.first_word, p.last_word), (5, 10));
+        // A query that spells the number still matches it.
+        assert!(locate(pages, "Faithfulness 587 measures", "how", TO_WINDOW, None).is_ok());
+        // A passage never starts on a margin number it does not spell.
+        let p = locate(pages, "measures", "how", TO_WINDOW, None).unwrap();
+        assert_eq!(p.first_word, 4);
     }
 
     #[test]

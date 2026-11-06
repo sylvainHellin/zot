@@ -20,6 +20,7 @@ Notable changes per release. Dates are release dates.
 
 ### Fixed
 
+- `zot annotate` matches a passage that crosses the margin line numbers of a review manuscript, which poppler reads into the text, and keeps them out of the highlight's text and boxes. A word hyphenated across a double-spaced line break also matches now.
 - Tag listing no longer stops early on the web API, whose `Total-Results` counts distinct tag names rather than the rows it pages over.
 - Tag type is read from `meta.type`, where the API actually puts it on `/tags`, so automatic tags are no longer indistinguishable from manual ones.
 - `zot tags --rename` checks its item list against api.zotero.org before asking, and sweeps the old tag only once the server agrees nothing carries it, so an item tagged on another device cannot be silently stripped instead of renamed.

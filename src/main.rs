@@ -401,7 +401,8 @@ enum Commands {
     /// Matching works on whole words and ignores case and punctuation: --from
     /// is found first, then the nearest --to after it within 400 words on the
     /// same page. Differences in word splitting are bridged (a superscript the
-    /// PDF sets apart, a word hyphenated across a line break). A passage that
+    /// PDF sets apart, a word hyphenated across a line break), and the line
+    /// numbers in the margin of a review manuscript are skipped. A passage that
     /// runs onto the next page is not found: annotate each page's part
     /// separately. Needs poppler's pdftotext and pdfinfo on the PATH.
     Annotate {

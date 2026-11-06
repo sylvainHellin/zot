@@ -365,6 +365,7 @@ The PDF is read from local storage the way `zot pdf` finds it, so the attachment
 Matching works on whole words and ignores case and punctuation.
 `--from` is found first, then the nearest `--to` after it within 400 words on the same page, and the highlight covers everything in between.
 Word splitting may differ between the text you copied and the PDF: a superscript the PDF sets apart (`Kern3` against `Kern` `3`) and a word hyphenated across a line break both still match.
+The line numbers printed in the margin of a review manuscript are skipped, so a passage copied across them still matches and the highlight leaves the margin out.
 `--page N` restricts the search to one physical page, counted from 1 whatever the printed label says.
 A passage that runs onto the next page is not found, since one highlight cannot span pages: annotate each page's part separately.
 
