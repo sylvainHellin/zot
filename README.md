@@ -86,6 +86,7 @@ zot add --pdf ~/Downloads/paper.pdf     # metadata recognized from the PDF
 | `zot add [id] [--pdf f]` | Add a paper by DOI/arXiv/ISBN/PubMed/PMCID identifier or web page URL, and/or PDF, locally via Zotero's connector API. |
 | `zot edit <key>` | Update item metadata, tags, and collection membership (web API plus sync). |
 | `zot attach <key> <file>` | Attach a file to an existing item (web API plus sync). |
+| `zot note <key>` | Create a child note on an item, or replace an existing note's content, from Markdown or HTML (web API plus sync). |
 | `zot annotate <key>` | Highlight a PDF passage found by its first and last words, with an optional comment, colour and tags (web API plus sync). `--dry-run` only locates it. |
 | `zot rm <key>...` | Move items to the Zotero trash (web API plus sync, restorable). |
 | `zot config` | One-time setup of the Zotero web API key for the write commands. |
@@ -312,7 +313,7 @@ A standalone attachment with no parent is not a paper waiting to be filed, it is
 Under `--json` the two lists are `items` and `stray`, alongside the `count` and `stray_count` totals; `--count` sets both lists to `null`, which is distinct from the `[]` that means there are none.
 Human `--count` prints the unfiled count alone, so `N=$(zot unfiled --count)` is a number; `--count --json` is the way to a script that also wants `stray_count`.
 
-## Editing the library (`zot edit`, `zot attach`, `zot rm`)
+## Editing the library (`zot edit`, `zot attach`, `zot note`, `zot rm`)
 
 Zotero's local API is read-only, so everything that modifies existing items goes through the Zotero web API (api.zotero.org) and reaches the local library on the next sync, usually within seconds when auto-sync is on.
 This requires Zotero sync and a one-time key setup:
@@ -331,6 +332,8 @@ zot edit A1B2C3D4 --add-tag reviewed --rm-tag to-read
 zot edit A1B2C3D4 --add-collection ABCD1234 --rm-collection "To Read"
 zot edit A1B2C3D4 --patch '{"creators":[{"creatorType":"author","firstName":"Ada","lastName":"Lovelace"}]}'
 zot attach A1B2C3D4 paper.pdf --title "Preprint PDF"
+zot note A1B2C3D4 --file review.md --tag review   # child note from Markdown
+zot note N1O2T3E4 --file - < review.md      # replace an existing note's content
 zot rm A1B2C3D4 E5F6G7H8         # moves to trash (restorable in the UI)
 ```
 
@@ -345,9 +348,13 @@ The output reports membership before and after (`collections: [Inbox (ABCD1234)]
 A request that changes nothing, adding a collection the item is already in, writes nothing and still exits 0, reporting `No change` with the item's unchanged version.
 A filing loop can therefore re-run over items it has already filed without special-casing them.
 
+`zot note` takes the text from `--file` (a path, or `-` for stdin) or `--text`, and converts Markdown, tables included, to the HTML Zotero stores; `--html` stores HTML as is.
+On a regular item it creates a child note; on a note key it replaces the content and adds any `--tag` to the note's own tags.
+Attachments and annotations cannot carry child notes, so their key is rejected with the parent's key in the message.
+
 `zot rm` never deletes permanently, items go to the Zotero trash.
 
-An item created locally moments ago, for example via `zot add`, must sync up before `edit`, `attach`, or `rm` can see it.
+An item created locally moments ago, for example via `zot add`, must sync up before `edit`, `attach`, `note`, or `rm` can see it.
 If you get "not found on api.zotero.org", sync Zotero and retry.
 
 ## Highlighting passages (`zot annotate`)

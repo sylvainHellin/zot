@@ -395,6 +395,34 @@ enum Commands {
         title: Option<String>,
     },
 
+    /// Write a note (via Zotero web API + sync): a child note on a regular
+    /// item, or new content for an existing note
+    ///
+    /// KEY is a regular item: a child note is created on it. KEY is a note:
+    /// its content is replaced (tags given with --tag are added to its own).
+    /// The input is Markdown, converted to the HTML Zotero stores, unless
+    /// --html says it is HTML already.
+    Note {
+        /// Parent item key (creates a child note) or note key (replaces it)
+        key: String,
+
+        /// File holding the note, or - for stdin
+        #[arg(long)]
+        file: Option<String>,
+
+        /// The note text itself
+        #[arg(long)]
+        text: Option<String>,
+
+        /// The input is HTML, stored as is
+        #[arg(long)]
+        html: bool,
+
+        /// Tag for the note (repeatable)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
+
     /// Highlight a PDF passage found by its first and last words (via Zotero
     /// web API + sync)
     ///
@@ -668,6 +696,20 @@ fn main() {
         Commands::Attach { key, file, title } => {
             commands::attach_cmd::run_attach(&key, &file, title.as_deref(), json)
         }
+        Commands::Note {
+            key,
+            file,
+            text,
+            html,
+            tags,
+        } => commands::note_cmd::run_note(commands::note_cmd::NoteArgs {
+            key: &key,
+            file: file.as_deref(),
+            text: text.as_deref(),
+            html,
+            tags: &tags,
+            json,
+        }),
         Commands::Annotate {
             key,
             from,

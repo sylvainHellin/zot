@@ -6,6 +6,7 @@ Notable changes per release. Dates are release dates.
 
 ### Added
 
+- `zot note KEY` writes a note through the web API: a child note on a regular item, or new content for an existing note, from Markdown (converted to HTML, tables included) or `--html`, read from `--file`, stdin or `--text`, with repeatable `--tag`.
 - Every command works without the Zotero desktop app: when the local API does not answer and a web API key is configured, reads go to api.zotero.org instead, with one note on stderr. `ZOT_BACKEND=auto|local|web` overrides the choice.
 - `zot pdf` and `zot index` find attachment files without the app: the copy in the Zotero data directory when its MD5 matches, else a download cached under `<cache>/zot/attachments/`.
 - `zot add` without the app creates the item through the web API from the resolved BibTeX, with every collection and tag in one request, and uploads the PDF. A PDF without an identifier is matched by the DOI or arXiv ID on its first page.

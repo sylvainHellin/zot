@@ -959,6 +959,28 @@ impl HumanDisplay for AttachOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct NoteOutput {
+    pub note_key: String,
+    pub parent_key: Option<String>,
+    pub action: String,
+    pub note: String,
+}
+
+impl HumanDisplay for NoteOutput {
+    fn human_display(&self) -> String {
+        let parent = self
+            .parent_key
+            .as_deref()
+            .map(|p| format!(" on [{p}]"))
+            .unwrap_or_default();
+        format!(
+            "Note {} {}{}\n  {}",
+            self.note_key, self.action, parent, self.note
+        )
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct RmOutput {
     pub trashed: Vec<String>,
     pub note: String,
